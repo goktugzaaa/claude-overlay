@@ -8,7 +8,7 @@
 iPhone-style, always-on-top notifications for the **Claude desktop app** (Chat, Cowork, Code) and **Claude Code** CLI on Windows.
 Shows up over fullscreen games and videos, where Windows hides its own toasts.
 
-![Banner and limit-reset logo over a fullscreen video](docs/banner-and-logo.png)
+![Demo: question banner answered from the overlay, limit-reset logo, task-finished banner](docs/demo.gif)
 
 - **Reply ready / task finished** → banner at the top of the screen with the conversation or project name and, for Claude Code, a summary of the last message.
 - **Asking permission** → banner with the exact tool call (`Bash: npm run build && git push …`) and **Allow / Deny** buttons. Your click is the answer; Claude Code continues without you leaving the game.
@@ -19,8 +19,8 @@ Shows up over fullscreen games and videos, where Windows hides its own toasts.
 
 ## Install
 
-1. Download `ClaudeOverlay-win64.zip` from [Releases](../../releases), extract anywhere (e.g. `%LOCALAPPDATA%\Programs\ClaudeOverlay`).
-2. Run `ClaudeOverlay.exe`. On first start it:
+1. Download `ClaudeOverlay-win64.7z` (about 60 MB; Windows 11 opens it natively, otherwise use 7-Zip) or the `.zip` from [Releases](../../releases) and extract anywhere, e.g. `%LOCALAPPDATA%\Programs\ClaudeOverlay`.
+2. Run `ClaudeOverlay.exe`. SmartScreen will warn once because the exe is not code-signed (certificates cost money; the code is all here): click **More info → Run anyway**. On first start it:
    - adds its hooks to `~/.claude/settings.json` (backup: `settings.json.claude-overlay.bak`),
    - wraps your existing status line command (its output is preserved),
    - adds itself to the Startup folder.
@@ -59,11 +59,15 @@ For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the 
 | `notification.durationMs`, `logo.durationMs` | how long things stay on screen |
 | `notification.showLastMessage` | include Claude's last message in the task-finished banner |
 | `events.*` | per-event switches: `stop`, `permission_request`, `question`, `permission_prompt`, `idle_prompt`, `agent_needs_input`, `quota_auto_resume_fired` |
-| `toasts.watchApps` | app names / AUMIDs to mirror (default `["Claude"]`); add other apps if you like |
+| `toasts.watchApps` | app names / AUMIDs to mirror (default `["Claude"]`); add `"Codex"`, `"ChatGPT"`, `"Cursor"` or any app whose toasts you want on top of fullscreen apps |
 | `limits.*` | which windows trigger the logo (`five_hour`, `seven_day`, `spend_limit`) and `minUsedPercentage` |
 | `interactive.enabled`, `interactive.waitMs`, `interactive.skipWhenFocused` | answer questions and permission requests from the banner; how long to wait; foreground process names that skip the wait |
 
 `events.log` in the same folder records everything the overlay receives.
+
+## Other agents and apps
+
+The notification-center bridge is generic: any app's toasts can be mirrored by adding its name to `toasts.watchApps`. Claude Code's hook format is also used by Codex CLI and others, so the hook scripts can be pointed at them with the same `claude-overlay-send.ps1 stop` command. Built-in support for more agents is on the roadmap; open an issue with the app name.
 
 ## Limits
 

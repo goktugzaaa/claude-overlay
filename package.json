@@ -13,7 +13,7 @@
     "stop-overlay": "powershell -NoProfile -ExecutionPolicy Bypass -File hooks/claude-overlay-send.ps1 quit",
     "icon": "electron scripts/make-icon.js",
     "package": "electron-packager . ClaudeOverlay --platform=win32 --arch=x64 --out=dist --overwrite --asar --icon=build/icon.ico --extra-resource=hooks --extra-resource=config.default.json --ignore=\"^/(dist|build|scripts|README.md|.gitignore)\"",
-    "dist": "npm run icon && npm run package && tar -a -cf dist/ClaudeOverlay-win64.zip -C dist ClaudeOverlay-win32-x64"
+    "dist": "npm run icon && npm run package && node scripts/postpackage.js"
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",

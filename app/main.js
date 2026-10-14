@@ -112,7 +112,7 @@ function startOverlay() {
     startToastListener();
     win.webContents.on('did-finish-load', () => {
       win.webContents.send('config', config);
-      if (!installer.isInstalled()) {
+      if (!installer.isInstalled() && !process.env.CLAUDE_OVERLAY_NO_INSTALL) {
         // First run (or the exe moved, or the hook set changed): wire everything up.
         try {
           const lines = installer.install();
