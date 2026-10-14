@@ -11,8 +11,8 @@ Shows up over fullscreen games and videos, where Windows hides its own toasts.
 ![Banner and limit-reset logo over a fullscreen video](docs/banner-and-logo.png)
 
 - **Reply ready / task finished** → banner at the top of the screen with the conversation or project name and, for Claude Code, a summary of the last message.
-- **Asking permission** → banner with the exact tool call (`Bash: npm run build && git push …`).
-- **Asking a question** → banner with the question and its options.
+- **Asking permission** → banner with the exact tool call (`Bash: npm run build && git push …`) and **Allow / Deny** buttons. Your click is the answer; Claude Code continues without you leaving the game.
+- **Asking a question** → banner with the question and its options as buttons. Click one and Claude gets the answer.
 - **Usage limit reset** (5-hour, weekly, spend limit) → animated Claude logo in the top-right corner, even if no session is open.
 - Click-through, never steals focus, follows the monitor your cursor is on, optional soft chime.
 - No Node, no admin rights. One exe, self-installing.
@@ -42,6 +42,10 @@ A tray icon (orange starburst) gives you test buttons, config, log, and uninstal
 
 When the same moment produces both a hook event and a toast, only one banner is shown (the hook, which carries more detail).
 
+### Answering from the banner
+
+For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the overlay open for `interactive.waitMs` (default 20 s). A click on **Allow**, **Deny** or an option is returned as the hook's JSON output (`decision` / `updatedInput.answers`), so Claude Code proceeds immediately. No click → the hook returns nothing and Claude Code's normal dialog appears. If the Claude app, a terminal or an IDE is the foreground window, the overlay skips the wait entirely (`interactive.skipWhenFocused`), because you can see the dialog anyway. Banners are click-through except while the pointer is over one with buttons, and the overlay never takes keyboard focus.
+
 ![Chat toast mirrored by the overlay](docs/chat-toast.png)
 
 ## Configuration
@@ -57,6 +61,7 @@ When the same moment produces both a hook event and a toast, only one banner is 
 | `events.*` | per-event switches: `stop`, `permission_request`, `question`, `permission_prompt`, `idle_prompt`, `agent_needs_input`, `quota_auto_resume_fired` |
 | `toasts.watchApps` | app names / AUMIDs to mirror (default `["Claude"]`); add other apps if you like |
 | `limits.*` | which windows trigger the logo (`five_hour`, `seven_day`, `spend_limit`) and `minUsedPercentage` |
+| `interactive.enabled`, `interactive.waitMs`, `interactive.skipWhenFocused` | answer questions and permission requests from the banner; how long to wait; foreground process names that skip the wait |
 
 `events.log` in the same folder records everything the overlay receives.
 

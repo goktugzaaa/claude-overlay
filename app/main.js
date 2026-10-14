@@ -5,8 +5,12 @@
 //   1. Windows notification center (UserNotificationListener) — every toast the Claude app
 //      emits (Chat / Cowork / Code) is mirrored as an overlay banner. Works in fullscreen.
 //   2. Claude Code hooks via hooks/claude-overlay-send.ps1 — Stop (task done + last message),
-//      PermissionRequest (tool + command), PreToolUse:AskUserQuestion (the question), Notification.
+//      PermissionRequest (tool + command, answerable), PreToolUse:AskUserQuestion (the question,
+//      answerable), Notification.
 //   3. Claude Code status line (rate_limits) via hooks/claude-overlay-statusline.ps1 — limit reset timers.
+//
+// Interactive events (question, permission) keep the hook's HTTP request open until the user
+// clicks a button on the banner or the wait expires; the reply becomes the hook's JSON output.
 //
 // CLI:  ClaudeOverlay.exe [--install | --uninstall | --send <type>]
 
@@ -27,7 +31,7 @@ let config = P.loadConfig();
 let L = i18n.pick(config.language, 'en');
 const T = () => L.t;
 const PORT = Number(process.env.CLAUDE_OVERLAY_PORT || config.port || 47821);
-const WINDOW_HEIGHT = 320;
+const WINDOW_HEIGHT = 380;
 
 function reloadConfig() {
   config = P.loadConfig();
@@ -91,6 +95,7 @@ let lastHookBannerAt = 0;
 let lastPermissionAt = 0;
 let listenerProc = null;
 let listenerStatus = 'starting';
+let foregroundProcess = '';
 
 function startOverlay() {
   if (!app.requestSingleInstanceLock()) {
@@ -108,7 +113,7 @@ function startOverlay() {
     win.webContents.on('did-finish-load', () => {
       win.webContents.send('config', config);
       if (!installer.isInstalled()) {
-        // First run (or the exe moved): wire everything up automatically.
+        // First run (or the exe moved, or the hook set changed): wire everything up.
         try {
           const lines = installer.install();
           config = P.loadConfig();
@@ -123,6 +128,7 @@ function startOverlay() {
   app.on('second-instance', () => handleEvent({ type: 'test-notify' }));
   app.on('window-all-closed', (e) => e.preventDefault());
   app.on('before-quit', () => {
+    for (const id of [...pending.keys()]) finishInteractive(id, null);
     if (listenerProc) { try { listenerProc.kill(); } catch {} }
   });
 }
@@ -152,11 +158,14 @@ function createWindow() {
     alwaysOnTop: true, backgroundColor: '#00000000',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
   });
-  win.setIgnoreMouseEvents(true);
+  // Click-through by default; `forward` lets the page see mouse moves so it can ask for
+  // real mouse events while the pointer is over an interactive banner.
+  win.setIgnoreMouseEvents(true, { forward: true });
   win.setAlwaysOnTop(true, 'screen-saver', 1);
   win.setMenu(null);
   win.loadFile(path.join(__dirname, 'overlay.html'));
   win.on('closed', () => { win = null; });
+  win.on('hide', () => { try { win.setIgnoreMouseEvents(true, { forward: true }); } catch {} });
 }
 
 function showOverlay() {
@@ -185,6 +194,18 @@ ipcMain.on('item-done', () => {
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => { if (win && activeItems === 0) win.hide(); }, 400);
   }
+});
+
+ipcMain.on('mouse', (_e, interactive) => {
+  if (!win) return;
+  logLine(['mouse', interactive ? 'capture' : 'passthrough']);
+  try { win.setIgnoreMouseEvents(!interactive, { forward: true }); } catch {}
+});
+
+ipcMain.on('answer', (_e, data) => {
+  if (!data || !data.id) return;
+  const { id, ...rest } = data;
+  finishInteractive(String(id), rest);
 });
 
 ipcMain.on('tray-icon', (_e, dataUrl) => {
@@ -242,7 +263,7 @@ function showLogo(caption) {
 // Human-readable one-liner for a tool call (permission requests).
 function describeTool(name, input) {
   const i = input && typeof input === 'object' ? input : {};
-  const short = (s, n = 140) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
+  const short = (s, n = 160) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
   switch (name) {
     case 'Bash': case 'PowerShell': return `${name}: ${short(i.command || i.description)}`;
     case 'Edit': case 'Write': case 'Read': case 'NotebookEdit': case 'MultiEdit': return `${name}: ${short(i.file_path || i.notebook_path)}`;
@@ -256,6 +277,76 @@ function describeTool(name, input) {
       return `${name || 'tool'}${firstStr ? ': ' + short(firstStr) : keys.length ? ': ' + short(JSON.stringify(i)) : ''}`;
     }
   }
+}
+
+// ---------------------------------------------------------------- interactive (question / permission)
+const pending = new Map(); // id -> { res, timer, type, event }
+let seq = 0;
+
+function respondJson(res, obj) {
+  try {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(obj));
+  } catch {}
+}
+
+function startInteractive(type, event, res) {
+  const icfg = config.interactive || {};
+  const events = config.events || {};
+  const enabledKey = type === 'question' ? 'question' : 'permission_request';
+  if (events[enabledKey] === false) return respondJson(res, {});
+
+  const skip = (icfg.skipWhenFocused || ['claude']).map((s) => String(s).toLowerCase());
+  if (icfg.enabled === false || skip.includes(String(foregroundProcess).toLowerCase())) {
+    // The Claude app is in front: its own dialog is visible, answer there. No banner either.
+    logLine([type + '-skip', foregroundProcess || 'disabled']);
+    lastHookBannerAt = Date.now();
+    if (type === 'permission') lastPermissionAt = Date.now();
+    return respondJson(res, {});
+  }
+
+  const waitMs = Math.max(3000, Number(icfg.waitMs) || 20000);
+  const id = String(++seq);
+  const timer = setTimeout(() => finishInteractive(id, null), waitMs);
+  pending.set(id, { res, timer, type, event });
+  lastHookBannerAt = Date.now();
+  if (type === 'permission') lastPermissionAt = Date.now();
+
+  const base = {
+    id, kind: type, waitMs, nowLabel: T().now, sound: config.sound !== false,
+    labels: { allow: T().allow, deny: T().deny, answerInApp: T().answerInApp, answered: T().answered, ok: 'OK' },
+  };
+  if (type === 'question') {
+    const qs = (event.tool_input && Array.isArray(event.tool_input.questions)) ? event.tool_input.questions : [];
+    const questions = qs.map((q) => ({
+      question: cleanMessage(q.question),
+      header: q.header || '',
+      multiSelect: !!q.multiSelect,
+      options: (Array.isArray(q.options) ? q.options : []).map((o) => ({ label: String(o.label || ''), description: String(o.description || '') })).filter((o) => o.label),
+    })).filter((q) => q.question);
+    if (!questions.length) return finishInteractive(id, null);
+    sendToRenderer('interactive', { ...base, title: T().codeName, subtitle: withProject(T().question, event.cwd), questions });
+  } else {
+    sendToRenderer('interactive', { ...base, title: T().codeName, subtitle: withProject(T().permission, event.cwd), body: describeTool(event.tool_name, event.tool_input) });
+  }
+}
+
+function finishInteractive(id, data) {
+  const p = pending.get(id);
+  if (!p) return;
+  pending.delete(id);
+  clearTimeout(p.timer);
+  let out = {};
+  if (data && p.type === 'question' && data.answers && typeof data.answers === 'object') {
+    out = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow',
+      updatedInput: { ...(p.event.tool_input || {}), answers: data.answers } } };
+  } else if (data && p.type === 'permission' && (data.behavior === 'allow' || data.behavior === 'deny')) {
+    out = { hookSpecificOutput: { hookEventName: 'PermissionRequest',
+      decision: data.behavior === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: 'Denied from Claude Overlay' } } };
+  }
+  logLine([p.type + '-answer', data ? JSON.stringify(data).slice(0, 200) : 'timeout']);
+  respondJson(p.res, out);
+  if (win) win.webContents.send('resolve', { id, answered: Object.keys(out).length > 0 });
 }
 
 // ---------------------------------------------------------------- limits
@@ -336,6 +427,7 @@ function startToastListener() {
 function handleListenerLine(line) {
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
+  if (msg.event === 'foreground') { foregroundProcess = String(msg.process || ''); return; }
   if (msg.event === 'access') {
     listenerStatus = msg.status === 'Allowed' ? 'allowed' : 'denied';
     logLine(['listener-access', msg.status]);
@@ -375,7 +467,7 @@ function showToastBanner(t, texts) {
   let label = T().replyReady;
   if (/izin|permission/.test(probe)) { kind = 'permission'; label = T().permission; }
   else if (i18n.GENERIC_WAITING.some((re) => re.test(body))) { kind = 'done'; label = T().replyReady; body = ''; }
-  else if (/\?\s*$/.test(body) || /\?/.test(body)) { kind = 'question'; label = T().question; }
+  else if (/\?/.test(body)) { kind = 'question'; label = T().question; }
   else if (/tamamland|complete|finished|done/.test(probe)) { kind = 'done'; label = T().taskDone; }
   notify({ title: t.app || T().appName, subtitle: head ? `${label} · ${head}` : label, body, kind });
 }
@@ -395,28 +487,6 @@ function handleEvent(event) {
       notify({ title: T().codeName, subtitle: withProject(T().taskDone, event.cwd), body, kind: 'done' });
       return;
     }
-    case 'permission': {
-      // PermissionRequest hook: tool_name + tool_input
-      if (events.permission_request === false) return;
-      lastHookBannerAt = Date.now();
-      lastPermissionAt = Date.now();
-      notify({ title: T().codeName, subtitle: withProject(T().permission, event.cwd), body: describeTool(event.tool_name, event.tool_input), kind: 'permission',
-        durationMs: Math.max(8000, (config.notification && config.notification.durationMs) || 0) });
-      return;
-    }
-    case 'question': {
-      // PreToolUse hook for AskUserQuestion: tool_input.questions[]
-      if (events.question === false) return;
-      lastHookBannerAt = Date.now();
-      const qs = (event.tool_input && Array.isArray(event.tool_input.questions)) ? event.tool_input.questions : [];
-      const parts = qs.map((q) => {
-        const opts = Array.isArray(q.options) ? q.options.map((o) => o.label).filter(Boolean) : [];
-        return cleanMessage(q.question) + (opts.length ? ` (${opts.join(' / ')})` : '');
-      });
-      notify({ title: T().codeName, subtitle: withProject(T().question, event.cwd), body: parts.join(' · ').slice(0, 220) || cleanMessage(event.message), kind: 'question',
-        durationMs: Math.max(9000, (config.notification && config.notification.durationMs) || 0) });
-      return;
-    }
     case 'notification': {
       const nt = event.notification_type || '';
       if (nt === 'quota_auto_resume_fired') { if (events.quota_auto_resume_fired !== false) showLogo(T().limitResumed); return; }
@@ -430,8 +500,6 @@ function handleEvent(event) {
     }
     case 'status': handleStatus(event.status || event); return;
     case 'test-notify': notify({ title: T().appName, subtitle: `${T().taskDone} · ${T().test}`, body: T().testBody, kind: 'done' }); return;
-    case 'test-question': notify({ title: T().codeName, subtitle: withProject(T().question, 'C:/demo/project'), body: 'Which database should we use? (Postgres / SQLite / MySQL)', kind: 'question', durationMs: 9000 }); return;
-    case 'test-permission': notify({ title: T().codeName, subtitle: withProject(T().permission, 'C:/demo/project'), body: 'Bash: npm install && npm run build', kind: 'permission', durationMs: 8000 }); return;
     case 'test-logo': showLogo(T().limitFiveHour); return;
     case 'reload-config': reloadConfig(); return;
     case 'quit': setTimeout(() => app.quit(), 50); return;
@@ -449,7 +517,8 @@ function startServer() {
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, pid: process.pid, packaged: P.PACKAGED, lang: L.lang, listener: listenerStatus, windows: state.windows, now: Math.floor(Date.now() / 1000) }));
+      res.end(JSON.stringify({ ok: true, pid: process.pid, packaged: P.PACKAGED, lang: L.lang, listener: listenerStatus,
+        foreground: foregroundProcess, pending: pending.size, windows: state.windows, now: Math.floor(Date.now() / 1000) }));
       return;
     }
     if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
@@ -459,8 +528,25 @@ function startServer() {
       let body = {};
       try { body = raw ? JSON.parse(raw) : {}; } catch { res.writeHead(400); res.end('bad json'); return; }
       const type = req.url.replace(/^\/+/, '') || body.type;
-      try { handleEvent({ ...body, type }); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}'); }
-      catch (err) { console.error(err); res.writeHead(500); res.end(String(err)); }
+      try {
+        if (type === 'question' || type === 'permission') {
+          logLine([type, body.tool_name || '', projectName(body.cwd)]);
+          startInteractive(type, body, res);
+          return;
+        }
+        if (type === 'test-question') {
+          startInteractive('question', { cwd: 'C:/demo/project', tool_name: 'AskUserQuestion', tool_input: { questions: [
+            { question: 'Which database should we use?', header: 'Database', options: [{ label: 'Postgres', description: 'Managed, scalable' }, { label: 'SQLite', description: 'Single file, zero setup' }, { label: 'MySQL', description: '' }] },
+          ] } }, res);
+          return;
+        }
+        if (type === 'test-permission') {
+          startInteractive('permission', { cwd: 'C:/demo/project', tool_name: 'Bash', tool_input: { command: 'npm install && npm run build' } }, res);
+          return;
+        }
+        handleEvent({ ...body, type });
+        respondJson(res, { ok: true });
+      } catch (err) { console.error(err); res.writeHead(500); res.end(String(err)); }
     });
   });
   server.on('error', (err) => { console.error('server error', err); if (err.code === 'EADDRINUSE') app.quit(); });

@@ -10,7 +10,7 @@ const P = require('./paths');
 const MARKERS = ['claude-overlay-', 'claude-notification/hooks/', 'ClaudeOverlay/resources/hooks/'];
 const isOurCommand = (c) => typeof c === 'string' && MARKERS.some((m) => c.includes(m));
 // Bump when the set of hooks changes so existing installs re-run the installer on next start.
-const INSTALL_VERSION = 3;
+const INSTALL_VERSION = 4;
 const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const SETTINGS = path.join(CLAUDE_DIR, 'settings.json');
 const BACKUP = path.join(CLAUDE_DIR, 'settings.json.claude-overlay.bak');
@@ -79,15 +79,18 @@ function install() {
     matcher: 'permission_prompt|idle_prompt|agent_needs_input|quota_auto_resume_fired',
     hooks: [{ type: 'command', command: psCommand(path.join(P.HOOKS_DIR, 'claude-overlay-send.ps1'), 'notification'), timeout: 15 }],
   });
-  // Observers only: they print nothing and exit 0, so Claude Code's own dialogs proceed unchanged.
+  // Interactive: the hook waits up to interactive.waitMs for a click on the overlay and returns
+  // the answer / decision. With no click it prints nothing, so Claude Code's own dialog proceeds.
+  const interactive = P.loadConfig().interactive || {};
+  const hookTimeout = Math.ceil((Number(interactive.waitMs) || 20000) / 1000) + 15;
   settings.hooks.PermissionRequest = settings.hooks.PermissionRequest || [];
   settings.hooks.PermissionRequest.push({
-    hooks: [{ type: 'command', command: psCommand(path.join(P.HOOKS_DIR, 'claude-overlay-send.ps1'), 'permission'), timeout: 10 }],
+    hooks: [{ type: 'command', command: psCommand(path.join(P.HOOKS_DIR, 'claude-overlay-send.ps1'), 'permission'), timeout: hookTimeout }],
   });
   settings.hooks.PreToolUse = settings.hooks.PreToolUse || [];
   settings.hooks.PreToolUse.push({
     matcher: 'AskUserQuestion',
-    hooks: [{ type: 'command', command: psCommand(path.join(P.HOOKS_DIR, 'claude-overlay-send.ps1'), 'question'), timeout: 10 }],
+    hooks: [{ type: 'command', command: psCommand(path.join(P.HOOKS_DIR, 'claude-overlay-send.ps1'), 'question'), timeout: hookTimeout }],
   });
 
   const current = settings.statusLine && settings.statusLine.type === 'command' ? settings.statusLine.command : null;

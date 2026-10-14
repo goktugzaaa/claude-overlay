@@ -24,6 +24,11 @@
     "dedupeWindowMs": 6000,
     "holdMs": 1500
   },
+  "interactive": {
+    "enabled": true,
+    "waitMs": 20000,
+    "skipWhenFocused": ["claude", "WindowsTerminal", "Code", "cursor", "windsurf", "pwsh", "powershell", "cmd", "conhost", "wezterm-gui", "alacritty", "mintty", "idea64", "webstorm64"]
+  },
   "limits": {
     "five_hour": true,
     "seven_day": true,

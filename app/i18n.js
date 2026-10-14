@@ -26,6 +26,10 @@ const STRINGS = {
     limitSpend: 'Spend limit reset',
     limitGeneric: 'Limit reset',
     limitResumed: 'Limit reset · resuming',
+    allow: 'Allow',
+    deny: 'Deny',
+    answerInApp: 'Answer in the app',
+    answered: 'Sent',
     tray: {
       testNotify: 'Test notification',
       testLogo: 'Test logo',
@@ -65,6 +69,10 @@ const STRINGS = {
     limitSpend: 'Harcama limiti yenilendi',
     limitGeneric: 'Limit yenilendi',
     limitResumed: 'Limit yenilendi · devam ediyor',
+    allow: 'İzin ver',
+    deny: 'Reddet',
+    answerInApp: 'Uygulamada cevapla',
+    answered: 'Gönderildi',
     tray: {
       testNotify: 'Bildirim testi',
       testLogo: 'Logo testi',

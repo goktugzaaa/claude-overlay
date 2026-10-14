@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="tr">
+<html lang="en">
 <head>
 <meta charset="utf-8" />
 <title>Claude Overlay</title>
@@ -12,6 +12,8 @@
     --ink-2: rgba(255, 255, 255, 0.62);
     --glass: rgba(26, 26, 28, 0.94);
     --glass-border: rgba(255, 255, 255, 0.14);
+    --green: #3fb46b;
+    --red: #e5484d;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -28,7 +30,8 @@
     display: flex; flex-direction: column; align-items: center; gap: 10px;
   }
   .banner {
-    width: min(420px, 92vw);
+    position: relative;
+    width: min(440px, 92vw);
     display: grid; grid-template-columns: 40px 1fr auto; column-gap: 12px; align-items: start;
     padding: 12px 14px 13px 12px;
     border-radius: 22px;
@@ -41,14 +44,11 @@
     color: var(--ink);
     transform: translateY(-140px) scale(0.96);
     opacity: 0;
+    overflow: hidden;
     animation: slide-in 620ms cubic-bezier(0.18, 1.25, 0.32, 1) forwards;
   }
-  .banner.leaving {
-    animation: slide-out 380ms cubic-bezier(0.5, 0, 0.75, 0) forwards;
-  }
-  @keyframes slide-in {
-    to { transform: translateY(0) scale(1); opacity: 1; }
-  }
+  .banner.leaving { animation: slide-out 380ms cubic-bezier(0.5, 0, 0.75, 0) forwards; }
+  @keyframes slide-in { to { transform: translateY(0) scale(1); opacity: 1; } }
   @keyframes slide-out {
     from { transform: translateY(0) scale(1); opacity: 1; }
     to   { transform: translateY(-120px) scale(0.96); opacity: 0; }
@@ -73,6 +73,31 @@
   .banner.question .app-icon { background: linear-gradient(160deg, #c9a2ff, #9b6cf0 55%, #7a4fd1); }
   .banner.question .body, .banner.permission .body { -webkit-line-clamp: 3; color: var(--ink); }
   .banner.permission .body { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
+
+  /* ------------------------------------------------------- interactive */
+  .banner.interactive { pointer-events: auto; cursor: default; }
+  .banner.interactive .body { -webkit-line-clamp: 4; }
+  .qhead { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); margin-top: 2px; }
+  .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .opt {
+    appearance: none; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.08);
+    color: var(--ink); font: inherit; font-size: 13px; font-weight: 600; line-height: 1;
+    padding: 8px 12px; border-radius: 999px; cursor: pointer; transition: background 120ms, transform 120ms;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .opt:hover { background: rgba(255,255,255,0.16); transform: translateY(-1px); }
+  .opt:active { transform: translateY(0) scale(0.98); }
+  .opt.sel { background: rgba(217,119,87,0.35); border-color: rgba(217,119,87,0.8); }
+  .opt.allow { background: rgba(63,180,107,0.22); border-color: rgba(63,180,107,0.7); }
+  .opt.allow:hover { background: rgba(63,180,107,0.38); }
+  .opt.deny { background: rgba(229,72,77,0.18); border-color: rgba(229,72,77,0.6); }
+  .opt.deny:hover { background: rgba(229,72,77,0.34); }
+  .opt.ok { background: rgba(217,119,87,0.3); border-color: rgba(217,119,87,0.8); }
+  .hint { font-size: 11.5px; color: var(--ink-2); margin-top: 6px; }
+  .progress { position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: var(--orange); opacity: 0.85; transform-origin: left; }
+  .banner.answered .opts, .banner.answered .progress { display: none; }
+  .banner.answered .hint { color: var(--green); font-weight: 600; }
+  .banner.expired .hint { color: var(--ink-2); }
 
   /* -------------------------------------------------------------- logo */
   #logo-slot {
@@ -192,13 +217,15 @@
     osc.stop(ac.currentTime + start + dur + 0.05);
   }
   function chimeNotify() {
-    // soft iOS-like tri-tone
     tone(1046.5, 0.00, 0.22, 0.16);
     tone(1318.5, 0.11, 0.26, 0.14);
     tone(1568.0, 0.22, 0.45, 0.12);
   }
+  function chimeAsk() {
+    tone(880.0, 0.00, 0.25, 0.14);
+    tone(1174.7, 0.14, 0.40, 0.14);
+  }
   function chimeLogo() {
-    // rising arpeggio with a shimmer
     tone(523.25, 0.00, 0.30, 0.12, 'triangle');
     tone(659.25, 0.12, 0.30, 0.12, 'triangle');
     tone(783.99, 0.24, 0.30, 0.12, 'triangle');
@@ -210,38 +237,148 @@
   const stack = document.getElementById('stack');
   const MAX_BANNERS = 3;
 
-  function showBanner(p) {
+  function bannerShell(p, extraClass) {
     const el = document.createElement('div');
-    el.className = `banner ${p.kind || 'done'}`;
+    el.className = `banner ${p.kind || 'done'} ${extraClass || ''}`;
     el.innerHTML = `
       <div class="app-icon">${starburstSvg({ size: 26, color: '#fff' })}</div>
       <div class="texts">
-        <div class="title">${escapeHtml(p.title || 'Claude Code')}</div>
+        <div class="title">${escapeHtml(p.title || 'Claude')}</div>
         ${p.subtitle ? `<div class="subtitle">${escapeHtml(p.subtitle)}</div>` : ''}
-        ${p.body ? `<div class="body">${escapeHtml(p.body)}</div>` : ''}
+        <div class="content"></div>
       </div>
       <div class="time">${escapeHtml(p.nowLabel || 'now')}</div>`;
     stack.appendChild(el);
-
     while (stack.children.length > MAX_BANNERS) {
       const old = stack.firstElementChild;
-      if (old && !old.classList.contains('leaving')) dismiss(old);
+      if (old && !old.classList.contains('leaving') && !old.classList.contains('interactive')) dismiss(old);
       else break;
     }
-    if (p.sound) { try { chimeNotify(); } catch {} }
+    return el;
+  }
 
-    const t = setTimeout(() => dismiss(el), p.durationMs || 6000);
-    el._timer = t;
+  function showBanner(p) {
+    const el = bannerShell(p);
+    const c = el.querySelector('.content');
+    if (p.body) c.innerHTML = `<div class="body">${escapeHtml(p.body)}</div>`;
+    else c.remove();
+    if (p.sound) { try { chimeNotify(); } catch {} }
+    el._timer = setTimeout(() => dismiss(el), p.durationMs || 6000);
   }
 
   function dismiss(el) {
     if (!el || el.classList.contains('leaving')) return;
     clearTimeout(el._timer);
     el.classList.add('leaving');
+    if (el.classList.contains('interactive')) window.overlay.setInteractive(false);
     el.addEventListener('animationend', () => {
       el.remove();
       window.overlay.itemDone();
     }, { once: true });
+  }
+
+  // ------------------------------------------------------- interactive
+  const interactive = new Map(); // id -> element
+
+  function showInteractive(p) {
+    const el = bannerShell(p, 'interactive');
+    el.dataset.id = p.id;
+    interactive.set(String(p.id), el);
+    el.addEventListener('mouseenter', () => window.overlay.setInteractive(true));
+    el.addEventListener('mouseleave', () => window.overlay.setInteractive(false));
+    const c = el.querySelector('.content');
+    const bar = document.createElement('div');
+    bar.className = 'progress';
+    el.appendChild(bar);
+    requestAnimationFrame(() => {
+      bar.style.transition = `transform ${p.waitMs}ms linear`;
+      bar.style.transform = 'scaleX(0)';
+    });
+    if (p.sound) { try { chimeAsk(); } catch {} }
+
+    if (p.kind === 'permission') {
+      c.innerHTML = `<div class="body">${escapeHtml(p.body || '')}</div>
+        <div class="opts">
+          <button class="opt allow">${escapeHtml(p.labels.allow)}</button>
+          <button class="opt deny">${escapeHtml(p.labels.deny)}</button>
+        </div>
+        <div class="hint"></div>`;
+      c.querySelector('.allow').addEventListener('click', () => answer(p, el, { behavior: 'allow' }));
+      c.querySelector('.deny').addEventListener('click', () => answer(p, el, { behavior: 'deny' }));
+      return;
+    }
+
+    // Questions, one at a time.
+    const answers = {};
+    let idx = 0;
+    const renderQ = () => {
+      const q = p.questions[idx];
+      const total = p.questions.length;
+      const selected = new Set();
+      c.innerHTML = `
+        ${q.header || total > 1 ? `<div class="qhead">${escapeHtml(q.header || '')}${total > 1 ? ` · ${idx + 1}/${total}` : ''}</div>` : ''}
+        <div class="body">${escapeHtml(q.question)}</div>
+        <div class="opts"></div>
+        <div class="hint"></div>`;
+      const opts = c.querySelector('.opts');
+      for (const o of q.options) {
+        const b = document.createElement('button');
+        b.className = 'opt';
+        b.textContent = o.label;
+        if (o.description) b.title = o.description;
+        b.addEventListener('click', () => {
+          if (q.multiSelect) {
+            b.classList.toggle('sel');
+            if (b.classList.contains('sel')) selected.add(o.label); else selected.delete(o.label);
+            return;
+          }
+          answers[q.question] = o.label;
+          next();
+        });
+        opts.appendChild(b);
+      }
+      if (q.multiSelect) {
+        const ok = document.createElement('button');
+        ok.className = 'opt ok';
+        ok.textContent = p.labels.ok;
+        ok.addEventListener('click', () => {
+          if (!selected.size) return;
+          answers[q.question] = [...selected].join(', ');
+          next();
+        });
+        opts.appendChild(ok);
+      }
+    };
+    const next = () => {
+      idx += 1;
+      if (idx < p.questions.length) renderQ();
+      else answer(p, el, { answers });
+    };
+    renderQ();
+  }
+
+  function answer(p, el, data) {
+    if (el.classList.contains('answered')) return;
+    el.classList.add('answered');
+    const hint = el.querySelector('.hint');
+    if (hint) hint.textContent = `✓ ${p.labels.answered}`;
+    window.overlay.answer(p.id, data);
+  }
+
+  function resolveInteractive({ id, answered }) {
+    const el = interactive.get(String(id));
+    if (!el) return;
+    interactive.delete(String(id));
+    if (!answered) {
+      el.classList.add('expired');
+      const opts = el.querySelector('.opts');
+      if (opts) opts.remove();
+      const bar = el.querySelector('.progress');
+      if (bar) bar.remove();
+      const hint = el.querySelector('.hint');
+      if (hint) hint.textContent = (el._labels && el._labels.answerInApp) || '';
+    }
+    setTimeout(() => dismiss(el), answered ? 900 : 2500);
   }
 
   // -------------------------------------------------------------- logo
@@ -249,11 +386,10 @@
   let logoTimer = null;
 
   function showLogo(p) {
-    // Only one logo at a time; a new call restarts the timer.
     const existing = logoSlot.querySelector('.logo-card');
     if (existing) {
       clearTimeout(logoTimer);
-      window.overlay.itemDone(); // balance the extra increment
+      window.overlay.itemDone();
       logoTimer = setTimeout(hideLogo, p.durationMs || 9000);
       return;
     }
@@ -265,7 +401,7 @@
       <div class="logo-svg">${starburstSvg({ size: 118, animated: true })}</div>`;
     const cap = document.createElement('div');
     cap.className = 'caption';
-    cap.innerHTML = `<b>✦</b>&nbsp; ${escapeHtml(p.caption || 'Kullanım limiti yenilendi')}`;
+    cap.innerHTML = `<b>✦</b>&nbsp; ${escapeHtml(p.caption || 'Limit reset')}`;
     logoSlot.appendChild(card);
     logoSlot.appendChild(cap);
     if (p.sound) { try { chimeLogo(); } catch {} }
@@ -304,6 +440,8 @@
   }
 
   window.overlay.on('notify', showBanner);
+  window.overlay.on('interactive', (p) => { showInteractive(p); const el = interactive.get(String(p.id)); if (el) el._labels = p.labels; });
+  window.overlay.on('resolve', resolveInteractive);
   window.overlay.on('logo', showLogo);
   window.overlay.on('config', () => {});
   buildTrayIcon();

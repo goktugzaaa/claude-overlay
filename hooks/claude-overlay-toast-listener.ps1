@@ -15,6 +15,29 @@ try {
     exit 1
 }
 
+# Foreground window tracking: lets the overlay skip interactive prompts while the Claude app itself is focused.
+try {
+    Add-Type -Namespace Overlay -Name Fg -MemberDefinition @'
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+'@
+} catch {}
+$lastFg = ''
+
+function Emit-Foreground {
+    try {
+        $h = [Overlay.Fg]::GetForegroundWindow()
+        $procId = [uint32]0
+        [Overlay.Fg]::GetWindowThreadProcessId($h, [ref]$procId) | Out-Null
+        $name = ''
+        if ($procId -gt 0) { $name = (Get-Process -Id $procId -ErrorAction SilentlyContinue).ProcessName }
+        if ($name -ne $script:lastFg) {
+            $script:lastFg = $name
+            Emit @{ event = 'foreground'; process = $name }
+        }
+    } catch {}
+}
+
 $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
     $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
 })[0]
@@ -43,6 +66,7 @@ $first = $true
 $startedAt = [DateTimeOffset]::Now.AddSeconds(-5)
 
 while ($true) {
+    Emit-Foreground
     try {
         $notifs = Await ($listener.GetNotificationsAsync($kinds)) ([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]])
         foreach ($n in $notifs) {

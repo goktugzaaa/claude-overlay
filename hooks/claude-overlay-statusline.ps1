@@ -1,6 +1,7 @@
 # Status line wrapper: forwards the status JSON (rate_limits etc.) to the overlay, then
 # runs the user's original status line command (if any) and prints its output.
 $ErrorActionPreference = 'SilentlyContinue'
+try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $cfgPath = Join-Path $env:APPDATA 'claude-notification\config.json'
 $cfg = $null
 try { $cfg = Get-Content -Raw -LiteralPath $cfgPath | ConvertFrom-Json } catch {}
