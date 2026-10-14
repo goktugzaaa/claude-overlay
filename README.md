@@ -1,5 +1,10 @@
 # Claude Overlay
 
+[![Release](https://img.shields.io/github/v/release/goktugzaaa/claude-overlay?label=download)](https://github.com/goktugzaaa/claude-overlay/releases/latest)
+[![Build](https://github.com/goktugzaaa/claude-overlay/actions/workflows/release.yml/badge.svg)](https://github.com/goktugzaaa/claude-overlay/actions)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+![Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
+
 iPhone-style, always-on-top notifications for the **Claude desktop app** (Chat, Cowork, Code) and **Claude Code** CLI on Windows.
 Shows up over fullscreen games and videos, where Windows hides its own toasts.
 
@@ -74,6 +79,12 @@ npm run dist           # icon + package + dist/ClaudeOverlay-win64.zip
 Running `npm start` points the hooks at the dev build; running the packaged exe points them back. Last one wins.
 
 Structure: `app/main.js` (overlay, HTTP endpoint on 127.0.0.1:47821, limit timers, toast bridge), `app/overlay.html` (banner + logo UI), `app/installer.js` (hooks, status line, startup shortcut), `hooks/claude-overlay-*.ps1` (what Claude Code and the toast listener run).
+
+## Privacy and safety
+
+Everything runs locally. The overlay listens only on `127.0.0.1`, reads notifications from your own Windows notification center, and never sends anything anywhere. The hooks it adds are observers: they print nothing and exit 0, so Claude Code's own permission dialogs and decisions are untouched. You can inspect every script in `hooks/`.
+
+Independent community project, not affiliated with or endorsed by Anthropic.
 
 ## License
 
