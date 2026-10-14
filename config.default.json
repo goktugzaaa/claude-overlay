@@ -1,0 +1,33 @@
+{
+  "port": 47821,
+  "language": "auto",
+  "sound": true,
+  "notification": {
+    "durationMs": 6000,
+    "showLastMessage": true
+  },
+  "logo": {
+    "durationMs": 9000
+  },
+  "events": {
+    "stop": true,
+    "permission_request": true,
+    "question": true,
+    "permission_prompt": true,
+    "idle_prompt": false,
+    "agent_needs_input": true,
+    "quota_auto_resume_fired": true
+  },
+  "toasts": {
+    "enabled": true,
+    "watchApps": ["Claude"],
+    "dedupeWindowMs": 6000,
+    "holdMs": 1500
+  },
+  "limits": {
+    "five_hour": true,
+    "seven_day": true,
+    "spend_limit": true,
+    "minUsedPercentage": 1
+  }
+}
