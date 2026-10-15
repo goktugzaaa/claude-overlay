@@ -1,6 +1,6 @@
 [package]
 name = "claude-overlay"
-version = "2.2.1"
+version = "2.2.2"
 edition = "2021"
 description = "Always-on-top notifications for the Claude desktop app and Claude Code on Windows"
 license = "MIT"

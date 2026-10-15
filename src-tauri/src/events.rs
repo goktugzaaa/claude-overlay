@@ -345,8 +345,12 @@ fn start_interactive(
     }
     let skip = config::get_str_list(&cfg, "interactive.skipWhenFocused");
     let fg = shared.foreground.lock().unwrap().clone();
+    // A focused Claude window / terminal only means "you can see the dialog" while someone
+    // is actually at the PC; after a short idle time the card (and the phone) take over.
+    let active_ms = config::get_u64(&cfg, "interactive.skipOnlyIfActiveMs", 30000);
+    let at_pc = active_ms == 0 || crate::win::idle_ms() < active_ms;
     if !config::get_bool(&cfg, "interactive.enabled", true)
-        || skip.iter().any(|s| s.eq_ignore_ascii_case(&fg))
+        || (at_pc && skip.iter().any(|s| s.eq_ignore_ascii_case(&fg)))
     {
         // The Claude app / a terminal is in front: its own dialog is visible, answer there.
         util::log_line(&[&format!("{kind}-skip"), if fg.is_empty() { "disabled" } else { &fg }]);

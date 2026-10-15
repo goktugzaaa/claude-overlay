@@ -30,6 +30,7 @@
   "interactive": {
     "enabled": true,
     "waitMs": 20000,
+    "skipOnlyIfActiveMs": 30000,
     "skipWhenFocused": ["claude", "WindowsTerminal", "Code", "cursor", "windsurf", "pwsh", "powershell", "cmd", "conhost", "wezterm-gui", "alacritty", "mintty", "idea64", "webstorm64"]
   },
   "phone": {

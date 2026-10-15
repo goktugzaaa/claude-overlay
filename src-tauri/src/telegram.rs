@@ -27,16 +27,18 @@ pub fn creds(cfg: &Value) -> Option<Creds> {
 
 fn api(token: &str, method: &str, body: &Value, timeout_s: u64) -> Result<Value, String> {
     let url = format!("https://api.telegram.org/bot{token}/{method}");
+    // Never let the bot token reach the log through error messages.
+    let redact = |s: String| s.replace(token, "***");
     let resp = ureq::post(&url)
         .timeout(Duration::from_secs(timeout_s))
         .send_json(body.clone());
     let v: Value = match resp {
-        Ok(r) => r.into_json().map_err(|e| e.to_string())?,
+        Ok(r) => r.into_json().map_err(|e| redact(e.to_string()))?,
         Err(ureq::Error::Status(code, r)) => {
             let text = r.into_string().unwrap_or_default();
-            return Err(format!("HTTP {code}: {}", util::truncate(&text, 200)));
+            return Err(redact(format!("HTTP {code}: {}", util::truncate(&text, 200))));
         }
-        Err(e) => return Err(e.to_string()),
+        Err(e) => return Err(redact(e.to_string())),
     };
     if v.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(util::truncate(&v.to_string(), 200));
