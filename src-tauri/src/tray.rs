@@ -17,6 +17,8 @@ fn make_menu(app: &AppHandle, shared: &Shared) -> tauri::Result<Menu<Wry>> {
         .text("open_log", t.open_log)
         .text("reload", t.reload)
         .separator()
+        .text("codex", if installer::codex_installed() { t.codex_disable } else { t.codex_enable })
+        .separator()
         .text("uninstall", t.uninstall)
         .text("quit", t.quit)
         .build()
@@ -65,6 +67,19 @@ fn on_menu(app: &AppHandle, shared: &Arc<Shared>, id: &str) {
         "open_config" => util::open_path(&util::config_path().to_string_lossy()),
         "open_log" => util::open_path(&util::log_path().to_string_lossy()),
         "reload" => events::handle_event(app, shared, "reload-config", &json!({})),
+        "codex" => {
+            let t = shared.t();
+            if installer::codex_installed() {
+                installer::uninstall_codex();
+                events::notify(app, shared, "Claude Overlay", t.codex_disabled, "", "info", None);
+            } else {
+                match installer::install_codex() {
+                    Ok(_) => events::notify(app, shared, "Claude Overlay", t.codex_enabled, t.codex_enabled_body, "done", None),
+                    Err(e) => events::notify(app, shared, "Claude Overlay", t.error, &e, "permission", None),
+                }
+            }
+            rebuild_menu(app, shared);
+        }
         "uninstall" => {
             installer::uninstall();
             let t = shared.t();

@@ -3,10 +3,11 @@
 //! can be moved freely (settings.json always points at the AppData copy).
 use crate::util;
 
-pub const SCRIPTS: [(&str, &str); 3] = [
+pub const SCRIPTS: [(&str, &str); 4] = [
     ("claude-overlay-send.ps1", include_str!("../../hooks/claude-overlay-send.ps1")),
     ("claude-overlay-statusline.ps1", include_str!("../../hooks/claude-overlay-statusline.ps1")),
     ("claude-overlay-toast-listener.ps1", include_str!("../../hooks/claude-overlay-toast-listener.ps1")),
+    ("claude-overlay-codex.ps1", include_str!("../../hooks/claude-overlay-codex.ps1")),
 ];
 
 pub fn write_scripts() {

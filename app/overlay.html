@@ -113,6 +113,15 @@
     border-radius: 12px; padding: 10px 12px; white-space: pre-wrap; word-break: break-all;
     max-height: 74px; overflow: hidden;
   }
+  .row.other .lbl { color: var(--ink-2); font-weight: 500; }
+  .free { display: flex; gap: 8px; margin-top: 10px; }
+  .free input {
+    flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--ink);
+    background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.14); border-radius: 12px;
+    padding: 0 12px; height: 42px; outline: none;
+  }
+  .free input:focus { border-color: rgba(217,119,87,0.8); box-shadow: 0 0 0 3px rgba(217,119,87,0.2); }
+  .free .btn { width: 110px; flex: none; }
   .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
   .actions.single { grid-template-columns: 1fr; }
   .btn {
@@ -222,6 +231,8 @@
       sendTrayIcon() {},
       hotRects(rects) { invoke('hot_rects', { rects }); },
       answer(id, data) { invoke('answer', { id: String(id), data }); },
+      extendWait(id, ms) { invoke('extend_wait', { id: String(id), ms }); },
+      focusInput(active) { invoke('focus_input', { active: !!active }); },
     };
   }
 
@@ -368,7 +379,17 @@
       bar.style.transform = 'scaleX(0)';
     });
     const count = foot.querySelector('.count');
-    const deadline = Date.now() + p.waitMs;
+    let deadline = Date.now() + p.waitMs;
+    const restartCountdown = (ms) => {
+      deadline = Date.now() + ms;
+      bar.style.transition = 'none';
+      bar.style.transform = 'scaleX(1)';
+      void bar.offsetWidth;
+      bar.style.transition = `transform ${ms}ms linear`;
+      bar.style.transform = 'scaleX(0)';
+      clearTimeout(el._tick);
+      tick();
+    };
     const tick = () => {
       if (!count.isConnected || el.classList.contains('answered')) return;
       const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
@@ -419,6 +440,39 @@
         });
         list.appendChild(row);
       }
+      // Free-text answer: Claude's question tool always accepts one. Typing needs keyboard
+      // focus, so the overlay takes it only while this field is open and hands it back after.
+      const otherRow = document.createElement('div');
+      otherRow.className = 'row other';
+      otherRow.innerHTML = `<div><div class="lbl">${escapeHtml(p.labels.other || 'Other…')}</div></div><span class="chev">✎</span>`;
+      otherRow.addEventListener('click', () => {
+        if (panel.querySelector('.free')) { panel.querySelector('.free input').focus(); return; }
+        const box = document.createElement('div');
+        box.className = 'free';
+        box.innerHTML = `<input type="text" maxlength="500" placeholder="${escapeHtml(p.labels.typePlaceholder || '')}" autocomplete="off" spellcheck="false"><button class="btn primary">${escapeHtml(p.labels.send || 'Send')}</button>`;
+        panel.appendChild(box);
+        const input = box.querySelector('input');
+        const submit = () => {
+          const v = input.value.trim();
+          if (!v) return;
+          window.overlay.focusInput(false);
+          if (q.multiSelect) { selected.add(v); answers[q.question] = [...selected].join(', '); }
+          else { answers[q.question] = v; }
+          next();
+        };
+        box.querySelector('.btn').addEventListener('click', submit);
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); submit(); }
+          else if (e.key === 'Escape') { e.preventDefault(); window.overlay.focusInput(false); box.remove(); }
+        });
+        const extra = 180000;
+        window.overlay.extendWait(p.id, extra);
+        restartCountdown(extra);
+        window.overlay.focusInput(true);
+        setTimeout(() => input.focus(), 60);
+        setTimeout(reportHotRects, 80);
+      });
+      list.appendChild(otherRow);
       if (q.multiSelect) {
         const actions = document.createElement('div');
         actions.className = 'actions single';
@@ -443,6 +497,7 @@
     if (el.classList.contains('answered')) return;
     el.classList.add('answered');
     clearTimeout(el._tick);
+    window.overlay.focusInput(false);
     const hint = el.querySelector('.hint');
     if (hint) hint.textContent = `✓ ${p.labels.answered}`;
     window.overlay.answer(p.id, data);
@@ -456,6 +511,7 @@
     if (!answered) {
       el.classList.add('expired');
       clearTimeout(el._tick);
+      window.overlay.focusInput(false);
       const hint = el.querySelector('.hint');
       if (hint) hint.textContent = (el._labels && el._labels.answerInApp) || '';
     }

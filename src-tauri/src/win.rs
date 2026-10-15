@@ -1,8 +1,8 @@
 //! Small Win32 helpers: never-activating window style and a message box for CLI mode.
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, MessageBoxW, SetWindowLongPtrW, GWL_EXSTYLE, MB_ICONINFORMATION, MB_OK,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GetForegroundWindow, GetWindowLongPtrW, MessageBoxW, SetForegroundWindow, SetWindowLongPtrW,
+    GWL_EXSTYLE, MB_ICONINFORMATION, MB_OK, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 fn hwnd_of(window: &tauri::WebviewWindow) -> Option<HWND> {
@@ -22,6 +22,29 @@ pub fn ensure_noactivate(window: &tauri::WebviewWindow) {
             if wanted != style {
                 SetWindowLongPtrW(h, GWL_EXSTYLE, wanted);
             }
+        }
+    }
+}
+
+/// Temporarily let the overlay take keyboard focus (free-text answers).
+pub fn allow_activate(window: &tauri::WebviewWindow) {
+    if let Some(h) = hwnd_of(window) {
+        unsafe {
+            let style = GetWindowLongPtrW(h, GWL_EXSTYLE);
+            SetWindowLongPtrW(h, GWL_EXSTYLE, style & !(WS_EX_NOACTIVATE as isize));
+            SetForegroundWindow(h);
+        }
+    }
+}
+
+pub fn foreground_hwnd() -> isize {
+    unsafe { GetForegroundWindow() as isize }
+}
+
+pub fn set_foreground_raw(hwnd: isize) {
+    if hwnd != 0 {
+        unsafe {
+            SetForegroundWindow(hwnd as HWND);
         }
     }
 }

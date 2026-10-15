@@ -12,7 +12,7 @@ Shows up over fullscreen games and videos, where Windows hides its own toasts. O
 
 - **Reply ready / task finished** → banner at the top of the screen with the conversation or project name and, for Claude Code, a summary of the last message.
 - **Asking permission** → banner with the exact tool call (`Bash: npm run build && git push …`) and **Allow / Deny** buttons. Your click is the answer; Claude Code continues without you leaving the game.
-- **Asking a question** → banner with the question and its options as buttons. Click one and Claude gets the answer.
+- **Asking a question** → banner with the question and its options as buttons, plus **Other…** to type your own answer. Click or type, and Claude gets the answer.
 - **Usage limit reset** (5-hour, weekly, spend limit) → animated Claude logo in the top-right corner, even if no session is open.
 - Click-through, never steals focus, follows the monitor your cursor is on, optional soft chime.
 
@@ -45,7 +45,7 @@ When the same moment produces both a hook event and a toast, only one banner is 
 
 ### Answering from the banner
 
-For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the overlay open for `interactive.waitMs` (default 20 s). A click on **Allow**, **Deny** or an option is returned as the hook's JSON output (`decision` / `updatedInput.answers`), so Claude Code proceeds immediately. No click → the hook returns nothing and Claude Code's normal dialog appears. If the Claude app, a terminal or an IDE is the foreground window, the overlay skips the wait entirely (`interactive.skipWhenFocused`), because you can see the dialog anyway. The overlay is click-through except over a card with buttons, and it never takes keyboard focus.
+For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the overlay open for `interactive.waitMs` (default 20 s). A click on **Allow**, **Deny** or an option is returned as the hook's JSON output (`decision` / `updatedInput.answers`), so Claude Code proceeds immediately. No click → the hook returns nothing and Claude Code's normal dialog appears. If the Claude app, a terminal or an IDE is the foreground window, the overlay skips the wait entirely (`interactive.skipWhenFocused`), because you can see the dialog anyway. The overlay is click-through except over a card with buttons. It takes keyboard focus only while you type into the **Other…** field (the wait extends to 3 minutes for that) and hands focus back to the window that had it as soon as you send or press Esc.
 
 ![Chat toast mirrored by the overlay](docs/chat-toast.png)
 
@@ -66,9 +66,22 @@ For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the 
 
 `events.log` in the same folder records everything the overlay receives. The PowerShell scripts Claude Code runs are written to `hooks\` in that folder on every start.
 
-## Other agents and apps
+## Compatibility
 
-The notification-center bridge is generic: any app's toasts can be mirrored by adding its name to `toasts.watchApps`. Claude Code's hook format is also used by Codex CLI and others, so the hook scripts can be pointed at them with the same `claude-overlay-send.ps1 stop` command. Built-in support for more agents is on the roadmap; open an issue with the app name.
+| Agent / app | What you get | How |
+|---|---|---|
+| Claude desktop app: Chat, Cowork | reply ready, question text (what the app's own notification carries) | notification-center bridge, automatic |
+| Claude Code: Code tab, CLI | everything: task finished with summary, Allow / Deny, answer questions (buttons or typed), limit reset | hooks, installed automatically |
+| Codex CLI / Codex app | task finished with the last message | `notify` adapter: tray → **Codex CLI: enable notifications** (edits `~/.codex/config.toml`; a `notify` you already had keeps running, and disable restores it) |
+| Any other app (Cursor, Windsurf, ChatGPT desktop, …) | its Windows notifications, mirrored over fullscreen apps | add the app name to `toasts.watchApps` |
+
+Codex under WSL: the adapter is a Windows script, so point `notify` in the WSL-side `~/.codex/config.toml` at it through interop:
+
+```toml
+notify = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:/Users/<you>/AppData/Roaming/claude-notification/hooks/claude-overlay-codex.ps1"]
+```
+
+Agents without a hook or notify mechanism cannot offer buttons; when one gains hooks, an adapter is a small script in `hooks/`. Open an issue with the agent name.
 
 ## Limits
 

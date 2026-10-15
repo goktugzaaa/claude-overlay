@@ -46,7 +46,8 @@ function Send-Event([int]$timeoutMs) {
 }
 
 $firstTimeout = 1500
-if ($interactive) { $firstTimeout = $waitMs + 5000 }
+# Interactive requests may be extended by the overlay while an answer is typed.
+if ($interactive) { $firstTimeout = $waitMs + 190000 }
 try { Send-Event $firstTimeout; exit 0 } catch {}
 if ($Type -eq 'quit') { exit 0 }
 
@@ -67,7 +68,7 @@ if (-not $recent) {
     } catch {}
 }
 $retryTimeout = 1000
-if ($interactive) { $retryTimeout = $waitMs + 5000 }
+if ($interactive) { $retryTimeout = $waitMs + 190000 }
 for ($i = 0; $i -lt 10; $i++) {
     Start-Sleep -Milliseconds 500
     try { Send-Event $retryTimeout; exit 0 } catch {}

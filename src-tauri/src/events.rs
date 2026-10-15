@@ -58,12 +58,14 @@ pub fn place_on_cursor_monitor(app: &AppHandle, force: bool) {
     }
 }
 
-pub fn show_overlay(app: &AppHandle) {
+pub fn show_overlay(app: &AppHandle, shared: &Shared) {
     place_on_cursor_monitor(app, false);
     if let Some(w) = window(app) {
         // Whoever set TOPMOST last wins, so re-assert it on every event.
         let _ = w.set_always_on_top(true);
-        crate::win::ensure_noactivate(&w);
+        if !shared.typing.load(Ordering::SeqCst) {
+            crate::win::ensure_noactivate(&w);
+        }
     }
 }
 
@@ -71,7 +73,7 @@ pub fn show_overlay(app: &AppHandle) {
 
 pub fn emit(app: &AppHandle, shared: &Shared, channel: &str, payload: Value) {
     shared.active_items.fetch_add(1, Ordering::SeqCst);
-    show_overlay(app);
+    show_overlay(app, shared);
     let _ = app.emit(channel, payload);
 }
 
@@ -259,7 +261,9 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
             } else {
                 String::new()
             };
-            notify(app, shared, t.code_name, &with_project(t.task_done, event.get("cwd")), &body, "done", None);
+            // Adapters for other agents (Codex) send their own title.
+            let title = event.get("title").and_then(Value::as_str).unwrap_or(t.code_name);
+            notify(app, shared, title, &with_project(t.task_done, event.get("cwd")), &body, "done", None);
         }
         "notification" => {
             let nt = event.get("notification_type").and_then(Value::as_str).unwrap_or("");
@@ -348,7 +352,7 @@ fn start_interactive(
     let id = (shared.seq.fetch_add(1, Ordering::SeqCst) + 1).to_string();
     shared.pending.lock().unwrap().insert(
         id.clone(),
-        Pending { req, kind: kind.to_string(), event: event.clone() },
+        Pending { req, kind: kind.to_string(), event: event.clone(), deadline_ms: util::now_ms() + wait_ms as i64 },
     );
     shared.last_hook_banner_ms.store(util::now_ms(), Ordering::SeqCst);
     if kind == "permission" {
@@ -358,9 +362,16 @@ fn start_interactive(
         let app = app.clone();
         let shared = shared.clone();
         let id = id.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(wait_ms));
-            finish_interactive(&app, &shared, &id, None);
+        std::thread::spawn(move || loop {
+            let remaining = shared.pending.lock().unwrap().get(&id).map(|p| p.deadline_ms - util::now_ms());
+            match remaining {
+                None => return,
+                Some(r) if r <= 0 => {
+                    finish_interactive(&app, &shared, &id, None);
+                    return;
+                }
+                Some(r) => std::thread::sleep(Duration::from_millis(r.clamp(10, 1000) as u64)),
+            }
         });
     }
 
@@ -370,7 +381,8 @@ fn start_interactive(
         "waitMs": wait_ms,
         "nowLabel": t.now,
         "sound": config::get_bool(&cfg, "sound", true),
-        "labels": {"allow": t.allow, "deny": t.deny, "answerInApp": t.answer_in_app, "answered": t.answered, "ok": "OK"},
+        "labels": {"allow": t.allow, "deny": t.deny, "answerInApp": t.answer_in_app, "answered": t.answered, "ok": "OK",
+                   "other": t.other, "send": t.send, "typePlaceholder": t.type_placeholder},
         "title": t.code_name,
     });
     if kind == "question" {
@@ -775,7 +787,9 @@ fn set_capture(app: &AppHandle, shared: &Shared, flag: bool) {
     util::log_line(&["mouse", if flag { "capture" } else { "passthrough" }]);
     if let Some(w) = window(app) {
         let _ = w.set_ignore_cursor_events(!flag);
-        crate::win::ensure_noactivate(&w);
+        if !shared.typing.load(Ordering::SeqCst) {
+            crate::win::ensure_noactivate(&w);
+        }
     }
 }
 
@@ -793,7 +807,9 @@ pub fn start_cursor_poll(app: AppHandle, shared: Arc<Shared>) {
             continue;
         }
         let Some(win) = window(&app) else { continue };
-        crate::win::ensure_noactivate(&win);
+        if !shared.typing.load(Ordering::SeqCst) {
+            crate::win::ensure_noactivate(&win);
+        }
         let (Ok(cur), Ok(pos), Ok(scale)) = (app.cursor_position(), win.outer_position(), win.scale_factor()) else {
             continue;
         };

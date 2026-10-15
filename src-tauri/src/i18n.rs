@@ -10,6 +10,8 @@ pub struct TrayStrings {
     pub reload: &'static str,
     pub uninstall: &'static str,
     pub quit: &'static str,
+    pub codex_enable: &'static str,
+    pub codex_disable: &'static str,
 }
 
 pub struct Strings {
@@ -42,6 +44,12 @@ pub struct Strings {
     pub deny: &'static str,
     pub answer_in_app: &'static str,
     pub answered: &'static str,
+    pub other: &'static str,
+    pub send: &'static str,
+    pub type_placeholder: &'static str,
+    pub codex_enabled: &'static str,
+    pub codex_enabled_body: &'static str,
+    pub codex_disabled: &'static str,
     pub tray: TrayStrings,
 }
 
@@ -75,6 +83,12 @@ pub static EN: Strings = Strings {
     deny: "Deny",
     answer_in_app: "Answer in the app",
     answered: "Sent",
+    other: "Other…",
+    send: "Send",
+    type_placeholder: "Type your answer",
+    codex_enabled: "Codex CLI connected",
+    codex_enabled_body: "Task-finished banners for Codex are on (~/.codex/config.toml).",
+    codex_disabled: "Codex CLI disconnected",
     tray: TrayStrings {
         test_notify: "Test notification",
         test_logo: "Test logo",
@@ -85,6 +99,8 @@ pub static EN: Strings = Strings {
         reload: "Reload config",
         uninstall: "Remove hooks",
         quit: "Quit",
+        codex_enable: "Codex CLI: enable notifications",
+        codex_disable: "Codex CLI: disable notifications",
     },
 };
 
@@ -118,6 +134,12 @@ pub static TR: Strings = Strings {
     deny: "Reddet",
     answer_in_app: "Uygulamada cevapla",
     answered: "Gönderildi",
+    other: "Başka…",
+    send: "Gönder",
+    type_placeholder: "Cevabını yaz",
+    codex_enabled: "Codex CLI bağlandı",
+    codex_enabled_body: "Codex için görev bitti bildirimleri açık (~/.codex/config.toml).",
+    codex_disabled: "Codex CLI bağlantısı kaldırıldı",
     tray: TrayStrings {
         test_notify: "Bildirim testi",
         test_logo: "Logo testi",
@@ -128,6 +150,8 @@ pub static TR: Strings = Strings {
         reload: "Config yeniden yükle",
         uninstall: "Hook'ları kaldır",
         quit: "Çıkış",
+        codex_enable: "Codex CLI: bildirimleri aç",
+        codex_disable: "Codex CLI: bildirimleri kapat",
     },
 };
 

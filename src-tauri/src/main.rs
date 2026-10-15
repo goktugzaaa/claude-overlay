@@ -24,7 +24,7 @@ mod win;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
 
@@ -33,6 +33,8 @@ pub struct Pending {
     pub req: tiny_http::Request,
     pub kind: String,
     pub event: Value,
+    /// Unix ms; the hook gets an empty reply when this passes. Typing an answer extends it.
+    pub deadline_ms: i64,
 }
 
 /// Clickable area of an interactive card, in CSS pixels of the overlay page.
@@ -62,6 +64,9 @@ pub struct Shared {
     pub listener_child: Mutex<Option<std::process::Child>>,
     pub tray: Mutex<Option<tauri::tray::TrayIcon>>,
     pub quitting: AtomicBool,
+    /// True while a free-text answer is being typed: the overlay then holds keyboard focus.
+    pub typing: AtomicBool,
+    pub prev_foreground: AtomicIsize,
 }
 
 impl Shared {
@@ -107,6 +112,54 @@ fn answer(id: String, data: Value, app: AppHandle, shared: State<'_, Arc<Shared>
     events::finish_interactive(&app, &shared, &id, Some(data));
 }
 
+/// Keep a pending card alive longer (the user opened the free-text field).
+#[tauri::command]
+fn extend_wait(id: String, ms: u64, shared: State<'_, Arc<Shared>>) {
+    if let Some(p) = shared.pending.lock().unwrap().get_mut(&id) {
+        p.deadline_ms = p.deadline_ms.max(util::now_ms() + ms as i64);
+    }
+}
+
+/// Take keyboard focus for the free-text field (true) and hand it back to the window that
+/// had it (false). Only while typing does the overlay ever become the active window.
+#[tauri::command]
+fn focus_input(active: bool, app: AppHandle, shared: State<'_, Arc<Shared>>) {
+    let Some(w) = events::window(&app) else { return };
+    if active {
+        if !shared.typing.swap(true, Ordering::SeqCst) {
+            shared.prev_foreground.store(win::foreground_hwnd(), Ordering::SeqCst);
+        }
+        win::allow_activate(&w);
+        let _ = w.set_focus();
+    } else if shared.typing.swap(false, Ordering::SeqCst) {
+        win::ensure_noactivate(&w);
+        win::set_foreground_raw(shared.prev_foreground.swap(0, Ordering::SeqCst));
+    }
+}
+
+#[tauri::command]
+fn codex_toggle(app: AppHandle, shared: State<'_, Arc<Shared>>) -> bool {
+    let t = shared.t();
+    let enabled = if installer::codex_installed() {
+        installer::uninstall_codex();
+        events::notify(&app, &shared, "Claude Overlay", t.codex_disabled, "", "info", None);
+        false
+    } else {
+        match installer::install_codex() {
+            Ok(_) => {
+                events::notify(&app, &shared, "Claude Overlay", t.codex_enabled, t.codex_enabled_body, "done", None);
+                true
+            }
+            Err(e) => {
+                events::notify(&app, &shared, "Claude Overlay", t.error, &e, "permission", None);
+                false
+            }
+        }
+    };
+    tray::rebuild_menu(&app, &shared);
+    enabled
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     config::ensure_user_data();
@@ -125,6 +178,15 @@ fn main() {
         let _ = http::post(port, "reload-config", "{}", 1500);
         let _ = http::post(port, "test-notify", "{}", 1500);
         win::message_box("Claude Overlay installed", &text);
+        return;
+    }
+    if args.iter().any(|a| a == "--install-codex") {
+        let text = match installer::install_codex() { Ok(m) => m, Err(e) => format!("Error: {e}") };
+        win::message_box("Codex CLI integration", &text);
+        return;
+    }
+    if args.iter().any(|a| a == "--uninstall-codex") {
+        win::message_box("Codex CLI integration", &installer::uninstall_codex());
         return;
     }
     if args.iter().any(|a| a == "--uninstall") {
@@ -170,12 +232,14 @@ fn main() {
         listener_child: Mutex::new(None),
         tray: Mutex::new(None),
         quitting: AtomicBool::new(false),
+        typing: AtomicBool::new(false),
+        prev_foreground: AtomicIsize::new(0),
     });
 
     let setup_shared = shared.clone();
     tauri::Builder::default()
         .manage(shared)
-        .invoke_handler(tauri::generate_handler![item_done, rlog, hot_rects, answer])
+        .invoke_handler(tauri::generate_handler![item_done, rlog, hot_rects, answer, extend_wait, focus_input, codex_toggle])
         .setup(move |app| {
             let handle = app.handle().clone();
             let window = handle.get_webview_window("main").ok_or("main window missing")?;

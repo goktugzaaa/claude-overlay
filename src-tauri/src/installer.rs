@@ -193,7 +193,8 @@ pub fn install() -> Result<Vec<String>, String> {
     // returns the answer / decision. With no click it prints nothing and Claude Code's own
     // dialog proceeds.
     let merged = config::load();
-    let hook_timeout = (config::get_u64(&merged, "interactive.waitMs", 20000) + 999) / 1000 + 15;
+    // Generous: a free-text answer typed on the card can take a while.
+    let hook_timeout = (config::get_u64(&merged, "interactive.waitMs", 20000) + 999) / 1000 + 200;
     push_hook(
         &mut settings,
         "PermissionRequest",
@@ -307,6 +308,105 @@ pub fn uninstall() -> Vec<String> {
     }
     let _ = util::write_json(&util::config_path(), &cfg);
     lines
+}
+
+// ---------------------------------------------------------------- Codex CLI (optional)
+
+fn codex_config_path() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".codex").join("config.toml")
+}
+
+fn codex_script() -> PathBuf {
+    util::hooks_dir().join("claude-overlay-codex.ps1")
+}
+
+fn codex_notify_line() -> String {
+    format!(
+        "notify = [\"powershell\", \"-NoProfile\", \"-ExecutionPolicy\", \"Bypass\", \"-File\", \"{}\"]",
+        fwd(&codex_script())
+    )
+}
+
+fn is_codex_notify_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("notify") && t[6..].trim_start().starts_with('=')
+}
+
+pub fn codex_installed() -> bool {
+    std::fs::read_to_string(codex_config_path())
+        .map(|s| s.lines().any(|l| is_codex_notify_line(l) && l.contains("claude-overlay-codex.ps1")))
+        .unwrap_or(false)
+}
+
+/// Adds our `notify` command to ~/.codex/config.toml (top-level key, so it goes before any
+/// `[table]`). A different existing `notify` is remembered and restored on disable.
+pub fn install_codex() -> Result<String, String> {
+    crate::hooks::write_scripts();
+    let path = codex_config_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let backup = path.with_extension("toml.claude-overlay.bak");
+    if path.exists() && !backup.exists() {
+        let _ = std::fs::copy(&path, &backup);
+    }
+    let mut cfg = util::read_json(&util::config_path()).unwrap_or_else(|| json!({}));
+    if !cfg.is_object() {
+        cfg = json!({});
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_table = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with('[') {
+            in_table = true;
+        }
+        if !in_table && is_codex_notify_line(line) {
+            if !line.contains("claude-overlay-codex.ps1") {
+                cfg["originalCodexNotify"] = json!(line.trim());
+            }
+            continue;
+        }
+        kept.push(line);
+    }
+    let mut out = String::new();
+    out.push_str(&codex_notify_line());
+    out.push('\n');
+    out.push_str(&kept.join("\n"));
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    std::fs::write(&path, out).map_err(|e| e.to_string())?;
+    let _ = util::write_json(&util::config_path(), &cfg);
+    Ok(format!("Codex notify set in {}", path.display()))
+}
+
+pub fn uninstall_codex() -> String {
+    let path = codex_config_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return "Codex config not found.".to_string();
+    };
+    let cfg = util::read_json(&util::config_path()).unwrap_or_else(|| json!({}));
+    let original = cfg.get("originalCodexNotify").and_then(Value::as_str).map(String::from);
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if is_codex_notify_line(line) && line.contains("claude-overlay-codex.ps1") {
+            if let Some(o) = &original {
+                out.push(o.clone());
+            }
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    let mut joined = out.join("\n");
+    if !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    let _ = std::fs::write(&path, joined);
+    "Codex notify removed.".to_string()
 }
 
 pub fn is_installed() -> bool {
