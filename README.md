@@ -16,6 +16,18 @@ Shows up over fullscreen games and videos, where Windows hides its own toasts. O
 - **Usage limit reset** (5-hour, weekly, spend limit) → animated Claude logo in the top-right corner, even if no session is open.
 - Click-through, never steals focus, follows the monitor your cursor is on, optional soft chime.
 
+## What Claude already does, and what this adds
+
+Claude's desktop app shows Windows toasts, and the Claude mobile app notifies you about cloud sessions and about local sessions you put under **Remote Control**, which also lets you drive those sessions from the phone. If that covers you, you do not need the phone part of this tool for Claude sessions.
+
+What this adds on top:
+
+- Windows suppresses toasts over fullscreen games and videos; the overlay is drawn anyway.
+- Permission requests and questions are answered on the spot, without switching to the Claude window.
+- A visible signal when your usage window resets; Claude does not notify about that.
+- The same banners for Codex and any other app's notifications, and phone relay for sessions that are not under Remote Control (plain CLI, Cowork, Codex), with one-tap Allow / Deny.
+- Everything local, no account.
+
 ## Install
 
 1. Download `ClaudeOverlay.exe` from [Releases](../../releases/latest) and put it anywhere, e.g. `%LOCALAPPDATA%\Programs\ClaudeOverlay`.
