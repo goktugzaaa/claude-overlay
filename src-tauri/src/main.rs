@@ -17,6 +17,8 @@ mod hooks;
 mod http;
 mod i18n;
 mod installer;
+mod phone;
+mod telegram;
 mod tray;
 mod util;
 mod win;
@@ -67,6 +69,9 @@ pub struct Shared {
     /// True while a free-text answer is being typed: the overlay then holds keyboard focus.
     pub typing: AtomicBool,
     pub prev_foreground: AtomicIsize,
+    /// Telegram message_id -> pending card id, for edits and typed replies.
+    pub tg_msgs: Mutex<HashMap<i64, String>>,
+    pub tg_last_pending: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -234,6 +239,8 @@ fn main() {
         quitting: AtomicBool::new(false),
         typing: AtomicBool::new(false),
         prev_foreground: AtomicIsize::new(0),
+        tg_msgs: Mutex::new(HashMap::new()),
+        tg_last_pending: Mutex::new(None),
     });
 
     let setup_shared = shared.clone();
@@ -263,6 +270,7 @@ fn main() {
             events::start_limit_timer(handle.clone(), setup_shared.clone());
             events::start_toast_listener(handle.clone(), setup_shared.clone());
             events::start_cursor_poll(handle.clone(), setup_shared.clone());
+            telegram::start(handle.clone(), setup_shared.clone());
             events::first_run(handle, setup_shared);
             Ok(())
         })

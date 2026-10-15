@@ -1,5 +1,7 @@
 //! Small Win32 helpers: never-activating window style and a message box for CLI mode.
 use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowLongPtrW, MessageBoxW, SetForegroundWindow, SetWindowLongPtrW,
     GWL_EXSTYLE, MB_ICONINFORMATION, MB_OK, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -46,6 +48,17 @@ pub fn set_foreground_raw(hwnd: isize) {
         unsafe {
             SetForegroundWindow(hwnd as HWND);
         }
+    }
+}
+
+/// Milliseconds since the last keyboard or mouse input on this PC.
+pub fn idle_ms() -> u64 {
+    unsafe {
+        let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+        if GetLastInputInfo(&mut info) == 0 {
+            return 0;
+        }
+        GetTickCount().wrapping_sub(info.dwTime) as u64
     }
 }
 

@@ -63,8 +63,26 @@ For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the 
 | `toasts.watchApps` | app names / AUMIDs to mirror (default `["Claude"]`); add `"Codex"`, `"ChatGPT"`, `"Cursor"` or any app whose toasts you want on top of fullscreen apps |
 | `limits.*` | which windows trigger the logo (`five_hour`, `seven_day`, `spend_limit`) and `minUsedPercentage` |
 | `interactive.enabled`, `interactive.waitMs`, `interactive.skipWhenFocused` | answer questions and permission requests from the banner; how long to wait; foreground process names that skip the wait |
+| `phone.*` | Telegram token / chat id, ntfy server / topic, `onlyWhenIdleMs`, per-event switches (`stop`, `permission`, `question`, `limit`) |
 
 `events.log` in the same folder records everything the overlay receives. The PowerShell scripts Claude Code runs are written to `hooks\` in that folder on every start.
+
+## Phone (Telegram / ntfy)
+
+The same banners on your phone, and permission requests and questions answered from there, with no server of your own. Off until you add a token or topic. By default it only kicks in after the PC has been idle for 3 minutes (`phone.onlyWhenIdleMs`; 0 = always).
+
+**Telegram, two-way**
+
+1. In Telegram open **@BotFather**, send `/newbot`, pick a name; copy the token.
+2. Tray → *Open config file* → put the token in `phone.telegram.token`, save, tray → *Reload config*.
+3. Open the chat with your new bot and send `/start`. The overlay pairs itself with that chat.
+4. Permission requests arrive with **Allow / Deny** buttons and questions with their options; a tap answers exactly like a click on the PC card. A typed reply answers a question with free text (`allow` / `deny`, `evet` / `hayır` work for permissions). Whichever side answers first wins; the PC card shows "Sent" and the Telegram message is updated.
+
+**ntfy, one-way**
+
+Install the ntfy app, subscribe to a long random topic name, put it in `phone.ntfy.topic` (`phone.ntfy.server` for a self-hosted ntfy). Banners arrive as push notifications, without buttons.
+
+Tray → *Phone: send test message* checks the setup, ignoring the idle rule. Messages pass through Telegram's or ntfy's servers; the bot token lives only in your config.json.
 
 ## Compatibility
 

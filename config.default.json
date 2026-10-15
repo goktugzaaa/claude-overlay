@@ -32,6 +32,13 @@
     "waitMs": 20000,
     "skipWhenFocused": ["claude", "WindowsTerminal", "Code", "cursor", "windsurf", "pwsh", "powershell", "cmd", "conhost", "wezterm-gui", "alacritty", "mintty", "idea64", "webstorm64"]
   },
+  "phone": {
+    "enabled": true,
+    "onlyWhenIdleMs": 180000,
+    "events": { "stop": true, "permission": true, "question": true, "limit": true },
+    "telegram": { "token": "", "chatId": "" },
+    "ntfy": { "server": "https://ntfy.sh", "topic": "" }
+  },
   "limits": {
     "five_hour": true,
     "seven_day": true,

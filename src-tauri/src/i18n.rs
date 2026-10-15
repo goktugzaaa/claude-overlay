@@ -12,6 +12,7 @@ pub struct TrayStrings {
     pub quit: &'static str,
     pub codex_enable: &'static str,
     pub codex_disable: &'static str,
+    pub phone_test: &'static str,
 }
 
 pub struct Strings {
@@ -50,6 +51,13 @@ pub struct Strings {
     pub codex_enabled: &'static str,
     pub codex_enabled_body: &'static str,
     pub codex_disabled: &'static str,
+    pub tg_paired: &'static str,
+    pub tg_no_open: &'static str,
+    pub tg_hint_reply: &'static str,
+    pub tg_answered: &'static str,
+    pub tg_expired: &'static str,
+    pub phone_not_configured: &'static str,
+    pub phone_test_sent: &'static str,
     pub tray: TrayStrings,
 }
 
@@ -89,6 +97,13 @@ pub static EN: Strings = Strings {
     codex_enabled: "Codex CLI connected",
     codex_enabled_body: "Task-finished banners for Codex are on (~/.codex/config.toml).",
     codex_disabled: "Codex CLI disconnected",
+    tg_paired: "Claude Overlay is paired with this chat. Banners will arrive here.",
+    tg_no_open: "No open question or permission request right now.",
+    tg_hint_reply: "Tap an option or reply with text.",
+    tg_answered: "Answered",
+    tg_expired: "⌛ Expired",
+    phone_not_configured: "Phone not configured: add a Telegram token or an ntfy topic in config.json",
+    phone_test_sent: "Test message sent to the phone",
     tray: TrayStrings {
         test_notify: "Test notification",
         test_logo: "Test logo",
@@ -101,6 +116,7 @@ pub static EN: Strings = Strings {
         quit: "Quit",
         codex_enable: "Codex CLI: enable notifications",
         codex_disable: "Codex CLI: disable notifications",
+        phone_test: "Phone: send test message",
     },
 };
 
@@ -140,6 +156,13 @@ pub static TR: Strings = Strings {
     codex_enabled: "Codex CLI bağlandı",
     codex_enabled_body: "Codex için görev bitti bildirimleri açık (~/.codex/config.toml).",
     codex_disabled: "Codex CLI bağlantısı kaldırıldı",
+    tg_paired: "Bu sohbet Claude Overlay ile eşleştirildi. Bildirimler buraya gelecek.",
+    tg_no_open: "Şu anda açık bir soru ya da izin isteği yok.",
+    tg_hint_reply: "Bir seçeneğe dokun ya da yazıyla cevapla.",
+    tg_answered: "Cevaplandı",
+    tg_expired: "⌛ Süresi doldu",
+    phone_not_configured: "Telefon ayarlı değil: config.json'a Telegram token ya da ntfy topic ekle",
+    phone_test_sent: "Telefona test mesajı gönderildi",
     tray: TrayStrings {
         test_notify: "Bildirim testi",
         test_logo: "Logo testi",
@@ -152,6 +175,7 @@ pub static TR: Strings = Strings {
         quit: "Çıkış",
         codex_enable: "Codex CLI: bildirimleri aç",
         codex_disable: "Codex CLI: bildirimleri kapat",
+        phone_test: "Telefon: test mesajı gönder",
     },
 };
 

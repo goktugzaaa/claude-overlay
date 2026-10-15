@@ -1,3 +1,4 @@
+use crate::phone::{self, PhoneMsg};
 use crate::{events, installer, util, Shared};
 use serde_json::json;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ fn make_menu(app: &AppHandle, shared: &Shared) -> tauri::Result<Menu<Wry>> {
         .text("reload", t.reload)
         .separator()
         .text("codex", if installer::codex_installed() { t.codex_disable } else { t.codex_enable })
+        .text("phone_test", t.phone_test)
         .separator()
         .text("uninstall", t.uninstall)
         .text("quit", t.quit)
@@ -79,6 +81,15 @@ fn on_menu(app: &AppHandle, shared: &Arc<Shared>, id: &str) {
                 }
             }
             rebuild_menu(app, shared);
+        }
+        "phone_test" => {
+            let t = shared.t();
+            if phone::configured(shared) {
+                phone::push(shared, PhoneMsg { kind: "test", text: format!("Claude Overlay · {}", t.phone_test_sent), buttons: vec![], pending_id: None });
+                events::notify(app, shared, "Claude Overlay", t.phone_test_sent, "", "done", None);
+            } else {
+                events::notify(app, shared, "Claude Overlay", t.phone_not_configured, "", "permission", Some(10000));
+            }
         }
         "uninstall" => {
             installer::uninstall();

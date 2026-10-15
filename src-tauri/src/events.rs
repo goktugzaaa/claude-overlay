@@ -1,6 +1,7 @@
 //! Everything that turns an incoming signal into something on screen: hook events,
 //! interactive cards (question / permission), mirrored toasts, limit-reset timers and the
 //! cursor polling that makes cards clickable.
+use crate::phone::{self, PhoneMsg};
 use crate::{config, i18n, installer, util, Pending, Shared};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
@@ -263,7 +264,9 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
             };
             // Adapters for other agents (Codex) send their own title.
             let title = event.get("title").and_then(Value::as_str).unwrap_or(t.code_name);
-            notify(app, shared, title, &with_project(t.task_done, event.get("cwd")), &body, "done", None);
+            let subtitle = with_project(t.task_done, event.get("cwd"));
+            notify(app, shared, title, &subtitle, &body, "done", None);
+            phone::push(shared, PhoneMsg { kind: "stop", text: format!("✅ {title} · {subtitle}\n{body}"), buttons: vec![], pending_id: None });
         }
         "notification" => {
             let nt = event.get("notification_type").and_then(Value::as_str).unwrap_or("");
@@ -428,20 +431,51 @@ fn start_interactive(
             finish_interactive(app, shared, &id, None);
             return;
         }
-        payload["subtitle"] = json!(with_project(t.question, event.get("cwd")));
+        let subtitle = with_project(t.question, event.get("cwd"));
+        let mut text = format!("❓ {} · {subtitle}\n", t.code_name);
+        for q in &questions {
+            text.push_str(q.get("question").and_then(Value::as_str).unwrap_or(""));
+            text.push('\n');
+        }
+        text.push_str(t.tg_hint_reply);
+        let buttons: Vec<Vec<(String, String)>> = questions[0]
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|os| {
+                os.iter()
+                    .enumerate()
+                    .filter_map(|(i, o)| {
+                        o.get("label")
+                            .and_then(Value::as_str)
+                            .map(|l| vec![(l.to_string(), format!("q:{id}:{i}"))])
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        payload["subtitle"] = json!(subtitle);
         payload["questions"] = Value::Array(questions);
+        emit(app, shared, "interactive", payload);
+        phone::push(shared, PhoneMsg { kind: "question", text, buttons, pending_id: Some(id.clone()) });
     } else {
-        payload["subtitle"] = json!(with_project(t.permission, event.get("cwd")));
-        payload["body"] = json!(describe_tool(
+        let subtitle = with_project(t.permission, event.get("cwd"));
+        let body_text = describe_tool(
             event.get("tool_name").and_then(Value::as_str).unwrap_or(""),
-            event.get("tool_input")
-        ));
+            event.get("tool_input"),
+        );
+        payload["subtitle"] = json!(subtitle);
+        payload["body"] = json!(body_text);
+        emit(app, shared, "interactive", payload);
+        let text = format!("🔐 {} · {subtitle}\n{body_text}", t.code_name);
+        let buttons = vec![vec![
+            (t.allow.to_string(), format!("p:{id}:a")),
+            (t.deny.to_string(), format!("p:{id}:d")),
+        ]];
+        phone::push(shared, PhoneMsg { kind: "permission", text, buttons, pending_id: Some(id.clone()) });
     }
-    emit(app, shared, "interactive", payload);
 }
 
 /// Resolve a pending card: `data` is the click ({answers} or {behavior}); None = timeout.
-pub fn finish_interactive(app: &AppHandle, shared: &Shared, id: &str, data: Option<Value>) {
+pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data: Option<Value>) {
     let pending = shared.pending.lock().unwrap().remove(id);
     let Some(p) = pending else { return };
     let mut out = json!({});
@@ -475,6 +509,25 @@ pub fn finish_interactive(app: &AppHandle, shared: &Shared, id: &str, data: Opti
     crate::http::respond_json(p.req, out.to_string());
     let _ = app.emit("resolve", json!({"id": id, "answered": answered}));
     util::log_line(&["resolve-sent", id]);
+    let t = shared.t();
+    let summary = match (p.kind.as_str(), data.as_ref().filter(|_| answered)) {
+        ("permission", Some(d)) => {
+            if d.get("behavior").and_then(Value::as_str) == Some("allow") {
+                format!("✓ {}", t.allow)
+            } else {
+                format!("✗ {}", t.deny)
+            }
+        }
+        ("question", Some(d)) => d
+            .get("answers")
+            .and_then(Value::as_object)
+            .and_then(|m| m.values().next())
+            .and_then(Value::as_str)
+            .map(|a| format!("✓ {a}"))
+            .unwrap_or_else(|| "✓".to_string()),
+        _ => t.tg_expired.to_string(),
+    };
+    phone::resolved(shared, id, summary);
 }
 
 // ---------------------------------------------------------------- limits
@@ -543,7 +596,7 @@ fn handle_status(app: &AppHandle, shared: &Arc<Shared>, status: &Value) {
     }
 }
 
-fn fire_reset(app: &AppHandle, shared: &Shared, name: &str, resets_at: i64) {
+fn fire_reset(app: &AppHandle, shared: &Arc<Shared>, name: &str, resets_at: i64) {
     let used = {
         let mut st = shared.state.lock().unwrap();
         let used = {
@@ -570,6 +623,7 @@ fn fire_reset(app: &AppHandle, shared: &Shared, name: &str, resets_at: i64) {
     }
     util::log_line(&["reset", name, &resets_at.to_string(), &format!("used={used}")]);
     show_logo(app, shared, window_label(shared, name));
+    phone::push(shared, PhoneMsg { kind: "limit", text: format!("🟠 {}", window_label(shared, name)), buttons: vec![], pending_id: None });
 }
 
 pub fn start_limit_timer(app: AppHandle, shared: Arc<Shared>) {
@@ -752,7 +806,7 @@ fn handle_toast(app: &AppHandle, shared: &Arc<Shared>, msg: &Value) {
     });
 }
 
-fn show_toast_banner(app: &AppHandle, shared: &Shared, app_name: &str, texts: &[String]) {
+fn show_toast_banner(app: &AppHandle, shared: &Arc<Shared>, app_name: &str, texts: &[String]) {
     let t = shared.t();
     let head = texts.first().cloned().unwrap_or_default();
     let mut body = texts.iter().skip(1).cloned().collect::<Vec<_>>().join(" · ");
@@ -776,6 +830,7 @@ fn show_toast_banner(app: &AppHandle, shared: &Shared, app_name: &str, texts: &[
     let subtitle = if head.is_empty() { label.to_string() } else { format!("{label} · {head}") };
     let title = if app_name.is_empty() { t.app_name } else { app_name };
     notify(app, shared, title, &subtitle, &body, kind, None);
+    phone::push(shared, PhoneMsg { kind: "stop", text: format!("💬 {title} · {subtitle}\n{body}"), buttons: vec![], pending_id: None });
 }
 
 // ---------------------------------------------------------------- cursor polling
