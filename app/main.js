@@ -31,7 +31,7 @@ let config = P.loadConfig();
 let L = i18n.pick(config.language, 'en');
 const T = () => L.t;
 const PORT = Number(process.env.CLAUDE_OVERLAY_PORT || config.port || 47821);
-const WINDOW_HEIGHT = 380;
+const WINDOW_HEIGHT = 640;
 
 function reloadConfig() {
   config = P.loadConfig();
@@ -158,14 +158,13 @@ function createWindow() {
     alwaysOnTop: true, backgroundColor: '#00000000',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
   });
-  // Click-through by default; `forward` lets the page see mouse moves so it can ask for
-  // real mouse events while the pointer is over an interactive banner.
-  win.setIgnoreMouseEvents(true, { forward: true });
+  // Click-through by default. While an interactive banner is on screen the main process
+  // polls the cursor and lifts the click-through only over the banner (see hot rects).
+  win.setIgnoreMouseEvents(true);
   win.setAlwaysOnTop(true, 'screen-saver', 1);
   win.setMenu(null);
   win.loadFile(path.join(__dirname, 'overlay.html'));
   win.on('closed', () => { win = null; });
-  win.on('hide', () => { try { win.setIgnoreMouseEvents(true, { forward: true }); } catch {} });
 }
 
 function showOverlay() {
@@ -181,6 +180,41 @@ function showOverlay() {
   else win.moveTop();
 }
 
+// ---------------------------------------------------------------- hot rects (clickable areas)
+// The renderer reports the rectangles of interactive banners; the main process polls the
+// cursor and toggles click-through accordingly. No Electron mouse-forwarding involved.
+let hotRects = [];
+let hotTimer = null;
+let capturing = false;
+
+function setCapture(flag) {
+  if (capturing === flag || !win) return;
+  capturing = flag;
+  logLine(['mouse', flag ? 'capture' : 'passthrough']);
+  try { win.setIgnoreMouseEvents(!flag); } catch {}
+}
+
+function pollCursor() {
+  if (!win || !hotRects.length) { setCapture(false); return; }
+  const p = screen.getCursorScreenPoint();
+  const b = win.getContentBounds();
+  const x = p.x - b.x, y = p.y - b.y;
+  const inside = hotRects.some((r) => x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 4 && y <= r.bottom + 4);
+  setCapture(inside);
+}
+
+ipcMain.on('hot-rects', (_e, rects) => {
+  hotRects = Array.isArray(rects) ? rects.filter((r) => r && r.right > r.left && r.bottom > r.top) : [];
+  if (hotRects.length && !hotTimer) {
+    hotTimer = setInterval(pollCursor, 40);
+    pollCursor();
+  } else if (!hotRects.length && hotTimer) {
+    clearInterval(hotTimer);
+    hotTimer = null;
+    setCapture(false);
+  }
+});
+
 function sendToRenderer(channel, payload) {
   if (!win) return;
   activeItems += 1;
@@ -192,15 +226,16 @@ ipcMain.on('item-done', () => {
   activeItems = Math.max(0, activeItems - 1);
   if (activeItems === 0) {
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => { if (win && activeItems === 0) win.hide(); }, 400);
+    // Hiding and re-showing the window breaks click delivery on Windows (clicks after a
+    // hide/show cycle never reach the page), so the empty transparent window stays visible
+    // unless window.hideWhenIdle is set.
+    if (config.window && config.window.hideWhenIdle) {
+      hideTimer = setTimeout(() => { if (win && activeItems === 0) win.hide(); }, 400);
+    }
   }
 });
 
-ipcMain.on('mouse', (_e, interactive) => {
-  if (!win) return;
-  logLine(['mouse', interactive ? 'capture' : 'passthrough']);
-  try { win.setIgnoreMouseEvents(!interactive, { forward: true }); } catch {}
-});
+ipcMain.on('rlog', (_e, message) => logLine(['renderer', String(message)]));
 
 ipcMain.on('answer', (_e, data) => {
   if (!data || !data.id) return;
@@ -347,6 +382,7 @@ function finishInteractive(id, data) {
   logLine([p.type + '-answer', data ? JSON.stringify(data).slice(0, 200) : 'timeout']);
   respondJson(p.res, out);
   if (win) win.webContents.send('resolve', { id, answered: Object.keys(out).length > 0 });
+  logLine(['resolve-sent', id]);
 }
 
 // ---------------------------------------------------------------- limits

@@ -24,6 +24,9 @@
     "dedupeWindowMs": 6000,
     "holdMs": 1500
   },
+  "window": {
+    "hideWhenIdle": false
+  },
   "interactive": {
     "enabled": true,
     "waitMs": 20000,

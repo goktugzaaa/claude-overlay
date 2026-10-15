@@ -75,29 +75,63 @@
   .banner.permission .body { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
 
   /* ------------------------------------------------------- interactive */
-  .banner.interactive { pointer-events: auto; cursor: default; }
-  .banner.interactive .body { -webkit-line-clamp: 4; }
-  .qhead { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); margin-top: 2px; }
-  .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .opt {
-    appearance: none; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.08);
-    color: var(--ink); font: inherit; font-size: 13px; font-weight: 600; line-height: 1;
-    padding: 8px 12px; border-radius: 999px; cursor: pointer; transition: background 120ms, transform 120ms;
-    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  .banner.interactive {
+    pointer-events: auto; cursor: default;
+    width: min(480px, 92vw);
+    padding: 14px 16px 16px 14px;
+    border-radius: 24px;
   }
-  .opt:hover { background: rgba(255,255,255,0.16); transform: translateY(-1px); }
-  .opt:active { transform: translateY(0) scale(0.98); }
-  .opt.sel { background: rgba(217,119,87,0.35); border-color: rgba(217,119,87,0.8); }
-  .opt.allow { background: rgba(63,180,107,0.22); border-color: rgba(63,180,107,0.7); }
-  .opt.allow:hover { background: rgba(63,180,107,0.38); }
-  .opt.deny { background: rgba(229,72,77,0.18); border-color: rgba(229,72,77,0.6); }
-  .opt.deny:hover { background: rgba(229,72,77,0.34); }
-  .opt.ok { background: rgba(217,119,87,0.3); border-color: rgba(217,119,87,0.8); }
-  .hint { font-size: 11.5px; color: var(--ink-2); margin-top: 6px; }
-  .progress { position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: var(--orange); opacity: 0.85; transform-origin: left; }
-  .banner.answered .opts, .banner.answered .progress { display: none; }
-  .banner.answered .hint { color: var(--green); font-weight: 600; }
-  .banner.expired .hint { color: var(--ink-2); }
+  .banner.interactive .texts { gap: 3px; }
+  .banner.interactive .body {
+    font-size: 15px; line-height: 20px; color: var(--ink); font-weight: 500;
+    -webkit-line-clamp: 4; margin-top: 4px;
+  }
+  .qhead { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); margin-top: 6px; }
+  .panel { grid-column: 1 / -1; margin-top: 12px; }
+  .list {
+    display: flex; flex-direction: column;
+    background: rgba(255,255,255,0.055); border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 14px; overflow: hidden;
+  }
+  .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 11px 14px; cursor: pointer;
+    border-top: 1px solid rgba(255,255,255,0.07);
+    transition: background 120ms;
+  }
+  .row:first-child { border-top: 0; }
+  .row:hover { background: rgba(255,255,255,0.10); }
+  .row:active { background: rgba(217,119,87,0.28); }
+  .row .lbl { font-size: 14px; font-weight: 600; color: var(--ink); line-height: 18px; }
+  .row .desc { font-size: 12.5px; color: var(--ink-2); line-height: 16px; margin-top: 2px; }
+  .row .chev { color: var(--ink-2); font-size: 15px; opacity: 0.55; flex: none; }
+  .row.sel { background: rgba(217,119,87,0.20); }
+  .row.sel .chev { color: var(--orange); opacity: 1; }
+  .cmd {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; line-height: 18px;
+    color: var(--cream); background: rgba(0,0,0,0.38); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px; padding: 10px 12px; white-space: pre-wrap; word-break: break-all;
+    max-height: 74px; overflow: hidden;
+  }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+  .actions.single { grid-template-columns: 1fr; }
+  .btn {
+    appearance: none; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.08);
+    color: var(--ink); font: inherit; font-size: 14px; font-weight: 650; height: 42px; border-radius: 13px;
+    cursor: pointer; transition: background 120ms, transform 120ms, border-color 120ms;
+  }
+  .btn:hover { background: rgba(255,255,255,0.14); }
+  .btn:active { transform: scale(0.985); }
+  .btn.primary { background: var(--orange); border-color: transparent; color: #1b120e; }
+  .btn.primary:hover { background: #e38a6a; }
+  .btn.danger:hover { background: rgba(229,72,77,0.22); border-color: rgba(229,72,77,0.6); }
+  .foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; min-height: 16px; font-size: 11.5px; color: var(--ink-2); }
+  .foot .hint { font-weight: 600; }
+  .foot .count { font-variant-numeric: tabular-nums; opacity: 0.8; }
+  .progress { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--orange); opacity: 0.7; transform-origin: left; }
+  .banner.answered .panel:not(.foot), .banner.answered .progress, .banner.expired .panel:not(.foot), .banner.expired .progress { display: none; }
+  .banner.answered .foot .hint { color: var(--green); }
+  .banner.answered .foot .count, .banner.expired .foot .count { display: none; }
 
   /* -------------------------------------------------------------- logo */
   #logo-slot {
@@ -268,11 +302,13 @@
 
   function dismiss(el) {
     if (!el || el.classList.contains('leaving')) return;
+    if (el.classList.contains('interactive')) window.overlay.log(`dismiss ${el.dataset.id}`);
     clearTimeout(el._timer);
     el.classList.add('leaving');
-    if (el.classList.contains('interactive')) window.overlay.setInteractive(false);
+    if (el.classList.contains('interactive')) reportHotRects();
     el.addEventListener('animationend', () => {
       el.remove();
+      if (el.classList.contains('interactive')) reportHotRects();
       window.overlay.itemDone();
     }, { once: true });
   }
@@ -280,13 +316,35 @@
   // ------------------------------------------------------- interactive
   const interactive = new Map(); // id -> element
 
+  // Keep the main process informed about where the clickable banners are.
+  let rectTimer = null;
+  function reportHotRects() {
+    const rects = [];
+    for (const el of stack.querySelectorAll('.banner.interactive')) {
+      if (el.classList.contains('leaving')) continue;
+      const r = el.getBoundingClientRect();
+      rects.push({ left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+    }
+    window.overlay.hotRects(rects);
+    if (rects.length && !rectTimer) rectTimer = setInterval(reportHotRects, 250);
+    if (!rects.length && rectTimer) { clearInterval(rectTimer); rectTimer = null; }
+  }
+
   function showInteractive(p) {
     const el = bannerShell(p, 'interactive');
     el.dataset.id = p.id;
+    el._labels = p.labels;
     interactive.set(String(p.id), el);
-    el.addEventListener('mouseenter', () => window.overlay.setInteractive(true));
-    el.addEventListener('mouseleave', () => window.overlay.setInteractive(false));
+    setTimeout(reportHotRects, 50);
+    setTimeout(reportHotRects, 700);
     const c = el.querySelector('.content');
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    const foot = document.createElement('div');
+    foot.className = 'panel foot';
+    foot.innerHTML = `<span class="hint"></span><span class="count"></span>`;
+    el.appendChild(panel);
+    el.appendChild(foot);
     const bar = document.createElement('div');
     bar.className = 'progress';
     el.appendChild(bar);
@@ -294,21 +352,30 @@
       bar.style.transition = `transform ${p.waitMs}ms linear`;
       bar.style.transform = 'scaleX(0)';
     });
+    const count = foot.querySelector('.count');
+    const deadline = Date.now() + p.waitMs;
+    const tick = () => {
+      if (!count.isConnected || el.classList.contains('answered')) return;
+      const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      count.textContent = `${left}s`;
+      if (left > 0) el._tick = setTimeout(tick, 250);
+    };
+    tick();
     if (p.sound) { try { chimeAsk(); } catch {} }
 
     if (p.kind === 'permission') {
-      c.innerHTML = `<div class="body">${escapeHtml(p.body || '')}</div>
-        <div class="opts">
-          <button class="opt allow">${escapeHtml(p.labels.allow)}</button>
-          <button class="opt deny">${escapeHtml(p.labels.deny)}</button>
-        </div>
-        <div class="hint"></div>`;
-      c.querySelector('.allow').addEventListener('click', () => answer(p, el, { behavior: 'allow' }));
-      c.querySelector('.deny').addEventListener('click', () => answer(p, el, { behavior: 'deny' }));
+      c.remove();
+      panel.innerHTML = `<div class="cmd">${escapeHtml(p.body || '')}</div>
+        <div class="actions">
+          <button class="btn danger">${escapeHtml(p.labels.deny)}</button>
+          <button class="btn primary">${escapeHtml(p.labels.allow)}</button>
+        </div>`;
+      panel.querySelector('.danger').addEventListener('click', () => answer(p, el, { behavior: 'deny' }));
+      panel.querySelector('.primary').addEventListener('click', () => answer(p, el, { behavior: 'allow' }));
       return;
     }
 
-    // Questions, one at a time.
+    // Questions, one at a time, as a tappable list.
     const answers = {};
     let idx = 0;
     const renderQ = () => {
@@ -317,36 +384,36 @@
       const selected = new Set();
       c.innerHTML = `
         ${q.header || total > 1 ? `<div class="qhead">${escapeHtml(q.header || '')}${total > 1 ? ` · ${idx + 1}/${total}` : ''}</div>` : ''}
-        <div class="body">${escapeHtml(q.question)}</div>
-        <div class="opts"></div>
-        <div class="hint"></div>`;
-      const opts = c.querySelector('.opts');
+        <div class="body">${escapeHtml(q.question)}</div>`;
+      panel.innerHTML = `<div class="list"></div>`;
+      const list = panel.querySelector('.list');
       for (const o of q.options) {
-        const b = document.createElement('button');
-        b.className = 'opt';
-        b.textContent = o.label;
-        if (o.description) b.title = o.description;
-        b.addEventListener('click', () => {
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.innerHTML = `<div><div class="lbl">${escapeHtml(o.label)}</div>${o.description ? `<div class="desc">${escapeHtml(o.description)}</div>` : ''}</div><span class="chev">${q.multiSelect ? '○' : '›'}</span>`;
+        row.addEventListener('click', () => {
           if (q.multiSelect) {
-            b.classList.toggle('sel');
-            if (b.classList.contains('sel')) selected.add(o.label); else selected.delete(o.label);
+            row.classList.toggle('sel');
+            row.querySelector('.chev').textContent = row.classList.contains('sel') ? '✓' : '○';
+            if (row.classList.contains('sel')) selected.add(o.label); else selected.delete(o.label);
             return;
           }
+          row.classList.add('sel');
           answers[q.question] = o.label;
-          next();
+          setTimeout(next, 120);
         });
-        opts.appendChild(b);
+        list.appendChild(row);
       }
       if (q.multiSelect) {
-        const ok = document.createElement('button');
-        ok.className = 'opt ok';
-        ok.textContent = p.labels.ok;
-        ok.addEventListener('click', () => {
+        const actions = document.createElement('div');
+        actions.className = 'actions single';
+        actions.innerHTML = `<button class="btn primary">${escapeHtml(p.labels.ok)}</button>`;
+        actions.querySelector('.btn').addEventListener('click', () => {
           if (!selected.size) return;
           answers[q.question] = [...selected].join(', ');
           next();
         });
-        opts.appendChild(ok);
+        panel.appendChild(actions);
       }
     };
     const next = () => {
@@ -360,6 +427,7 @@
   function answer(p, el, data) {
     if (el.classList.contains('answered')) return;
     el.classList.add('answered');
+    clearTimeout(el._tick);
     const hint = el.querySelector('.hint');
     if (hint) hint.textContent = `✓ ${p.labels.answered}`;
     window.overlay.answer(p.id, data);
@@ -367,14 +435,12 @@
 
   function resolveInteractive({ id, answered }) {
     const el = interactive.get(String(id));
+    window.overlay.log(`resolve ${id} answered=${answered} found=${!!el}`);
     if (!el) return;
     interactive.delete(String(id));
     if (!answered) {
       el.classList.add('expired');
-      const opts = el.querySelector('.opts');
-      if (opts) opts.remove();
-      const bar = el.querySelector('.progress');
-      if (bar) bar.remove();
+      clearTimeout(el._tick);
       const hint = el.querySelector('.hint');
       if (hint) hint.textContent = (el._labels && el._labels.answerInApp) || '';
     }
@@ -439,8 +505,9 @@
     img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
   }
 
+  window.onerror = (m, src, line, col) => { try { window.overlay.log(`error ${m} @${line}:${col}`); } catch {} };
   window.overlay.on('notify', showBanner);
-  window.overlay.on('interactive', (p) => { showInteractive(p); const el = interactive.get(String(p.id)); if (el) el._labels = p.labels; });
+  window.overlay.on('interactive', showInteractive);
   window.overlay.on('resolve', resolveInteractive);
   window.overlay.on('logo', showLogo);
   window.overlay.on('config', () => {});

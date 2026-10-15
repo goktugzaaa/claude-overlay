@@ -9,12 +9,16 @@ contextBridge.exposeInMainWorld('overlay', {
   itemDone() {
     ipcRenderer.send('item-done');
   },
+  log(message) {
+    ipcRenderer.send('rlog', String(message).slice(0, 500));
+  },
   sendTrayIcon(dataUrl) {
     ipcRenderer.send('tray-icon', dataUrl);
   },
-  // Interactive banners: the pointer is over a clickable banner (true) or not (false).
-  setInteractive(flag) {
-    ipcRenderer.send('mouse', !!flag);
+  // Interactive banners: report their on-screen rectangles (CSS px) so the main process
+  // can make just those areas clickable.
+  hotRects(rects) {
+    ipcRenderer.send('hot-rects', rects);
   },
   // Answer a pending question / permission request. data: { answers } or { behavior }.
   answer(id, data) {
