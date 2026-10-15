@@ -190,11 +190,13 @@ pub fn handle_request(
 ) {
     match kind {
         "question" | "permission" => {
-            util::log_line(&[
-                kind,
-                body.get("tool_name").and_then(Value::as_str).unwrap_or(""),
-                &util::project_name(body.get("cwd")),
-            ]);
+            let tool = body.get("tool_name").and_then(Value::as_str).unwrap_or("");
+            util::log_line(&[kind, tool, &util::project_name(body.get("cwd"))]);
+            if kind == "permission" && tool == "AskUserQuestion" {
+                // The question card covers this; a permission card for it would be noise.
+                crate::http::respond_json(req, "{}".to_string());
+                return;
+            }
             start_interactive(app, shared, kind, body, req);
         }
         "test-question" => start_interactive(
@@ -347,11 +349,12 @@ fn start_interactive(
     let fg = shared.foreground.lock().unwrap().clone();
     // A focused Claude window / terminal only means "you can see the dialog" while someone
     // is actually at the PC; after a short idle time the card (and the phone) take over.
+    // With a phone channel configured the card is never skipped: a question often arrives
+    // seconds after you sent the prompt, and only an open card can reach the phone later.
     let active_ms = config::get_u64(&cfg, "interactive.skipOnlyIfActiveMs", 30000);
     let at_pc = active_ms == 0 || crate::win::idle_ms() < active_ms;
-    if !config::get_bool(&cfg, "interactive.enabled", true)
-        || (at_pc && skip.iter().any(|s| s.eq_ignore_ascii_case(&fg)))
-    {
+    let focus_skip = !phone::configured(shared) && at_pc && skip.iter().any(|s| s.eq_ignore_ascii_case(&fg));
+    if !config::get_bool(&cfg, "interactive.enabled", true) || focus_skip {
         // The Claude app / a terminal is in front: its own dialog is visible, answer there.
         util::log_line(&[&format!("{kind}-skip"), if fg.is_empty() { "disabled" } else { &fg }]);
         shared.last_hook_banner_ms.store(util::now_ms(), Ordering::SeqCst);
