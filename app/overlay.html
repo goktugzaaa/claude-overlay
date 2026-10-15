@@ -210,6 +210,21 @@
   <canvas id="icon-canvas" width="32" height="32" style="display:none"></canvas>
 
 <script>
+  // Bridge to the host. Electron provides window.overlay through its preload script;
+  // the Tauri build exposes window.__TAURI__ (invoke + events) and gets the same API here.
+  if (!window.overlay && window.__TAURI__) {
+    const { invoke } = window.__TAURI__.core;
+    const { listen } = window.__TAURI__.event;
+    window.overlay = {
+      on(channel, handler) { listen(channel, (e) => handler(e.payload)); },
+      itemDone() { invoke('item_done'); },
+      log(message) { invoke('rlog', { message: String(message) }); },
+      sendTrayIcon() {},
+      hotRects(rects) { invoke('hot_rects', { rects }); },
+      answer(id, data) { invoke('answer', { id: String(id), data }); },
+    };
+  }
+
   // Claude starburst: 12 rays with slightly irregular angle, length and weight.
   const RAYS = [
     [  0, 1.00, 10.5 ], [ 32, 0.78, 9.5 ], [ 58, 0.92, 10 ], [ 90, 0.70, 9 ],

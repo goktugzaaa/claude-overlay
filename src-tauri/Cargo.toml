@@ -1,0 +1,30 @@
+[package]
+name = "claude-overlay"
+version = "2.0.0"
+edition = "2021"
+description = "Always-on-top notifications for the Claude desktop app and Claude Code on Windows"
+license = "MIT"
+repository = "https://github.com/goktugzaaa/claude-overlay"
+
+[[bin]]
+name = "ClaudeOverlay"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+sys-locale = "0.3"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

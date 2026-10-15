@@ -1,4 +1,6 @@
 node_modules/
 dist/
 build/
+build.log
+build.done
 LAUNCH-POSTS.md

@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Overlay window: events and invoke",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -13,23 +13,22 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run dist
+          workspaces: src-tauri
+      - run: powershell -ExecutionPolicy Bypass -File scripts/dist.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: ClaudeOverlay-win64
           path: |
-            dist/ClaudeOverlay-win64.7z
+            dist/ClaudeOverlay.exe
             dist/ClaudeOverlay-win64.zip
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/ClaudeOverlay-win64.7z
+            dist/ClaudeOverlay.exe
             dist/ClaudeOverlay-win64.zip
           generate_release_notes: true

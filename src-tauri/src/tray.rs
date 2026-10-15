@@ -1,0 +1,76 @@
+use crate::{events, installer, util, Shared};
+use serde_json::json;
+use std::sync::Arc;
+use tauri::menu::{Menu, MenuBuilder};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Wry};
+
+fn make_menu(app: &AppHandle, shared: &Shared) -> tauri::Result<Menu<Wry>> {
+    let t = &shared.t().tray;
+    MenuBuilder::new(app)
+        .text("test_notify", t.test_notify)
+        .text("test_logo", t.test_logo)
+        .separator()
+        .text("reinstall", t.reinstall)
+        .text("notif_access", t.notif_access)
+        .text("open_config", t.open_config)
+        .text("open_log", t.open_log)
+        .text("reload", t.reload)
+        .separator()
+        .text("uninstall", t.uninstall)
+        .text("quit", t.quit)
+        .build()
+}
+
+pub fn build(app: &AppHandle, shared: &Arc<Shared>) -> tauri::Result<()> {
+    let menu = make_menu(app, shared)?;
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
+    let s = shared.clone();
+    let tray = TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .tooltip(format!("Claude Overlay · 127.0.0.1:{}", shared.port))
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(move |app, event| on_menu(app, &s, event.id.as_ref()))
+        .build(app)?;
+    *shared.tray.lock().unwrap() = Some(tray);
+    Ok(())
+}
+
+pub fn rebuild_menu(app: &AppHandle, shared: &Shared) {
+    if let Ok(menu) = make_menu(app, shared) {
+        if let Some(tray) = shared.tray.lock().unwrap().as_ref() {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
+fn on_menu(app: &AppHandle, shared: &Arc<Shared>, id: &str) {
+    match id {
+        "test_notify" => events::handle_event(app, shared, "test-notify", &json!({})),
+        "test_logo" => events::handle_event(app, shared, "test-logo", &json!({})),
+        "reinstall" => match installer::install() {
+            Ok(_) => {
+                shared.reload_config();
+                rebuild_menu(app, shared);
+                let t = shared.t();
+                events::notify(app, shared, "Claude Overlay", t.hooks_installed, "", "done", None);
+            }
+            Err(e) => {
+                let t = shared.t();
+                events::notify(app, shared, "Claude Overlay", t.error, &e, "permission", None);
+            }
+        },
+        "notif_access" => util::open_path("ms-settings:privacy-notifications"),
+        "open_config" => util::open_path(&util::config_path().to_string_lossy()),
+        "open_log" => util::open_path(&util::log_path().to_string_lossy()),
+        "reload" => events::handle_event(app, shared, "reload-config", &json!({})),
+        "uninstall" => {
+            installer::uninstall();
+            let t = shared.t();
+            events::notify(app, shared, "Claude Overlay", t.hooks_removed, "", "info", None);
+        }
+        "quit" => events::quit(app, shared),
+        _ => {}
+    }
+}
