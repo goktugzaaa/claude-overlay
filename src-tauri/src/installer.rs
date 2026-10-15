@@ -193,8 +193,9 @@ pub fn install() -> Result<Vec<String>, String> {
     // returns the answer / decision. With no click it prints nothing and Claude Code's own
     // dialog proceeds.
     let merged = config::load();
-    // Generous: a free-text answer typed on the card can take a while.
-    let hook_timeout = (config::get_u64(&merged, "interactive.waitMs", 20000) + 999) / 1000 + 200;
+    // Generous: a typed answer or an answer from the phone can take a while.
+    let hold = config::get_u64(&merged, "phone.holdMs", 480000).max(config::get_u64(&merged, "interactive.waitMs", 20000));
+    let hook_timeout = (hold + 999) / 1000 + 260;
     push_hook(
         &mut settings,
         "PermissionRequest",

@@ -55,6 +55,7 @@ pub fn send(shared: &Shared, text: &str, buttons: &[Vec<(String, String)>]) -> R
     let mut body = json!({
         "chat_id": c.chat_id,
         "text": util::truncate(text, 3500),
+        "parse_mode": "HTML",
         "disable_web_page_preview": true,
     });
     if !buttons.is_empty() {
@@ -87,6 +88,7 @@ pub fn edit(shared: &Shared, message_id: i64, text: &str) {
         "chat_id": c.chat_id,
         "message_id": message_id,
         "text": util::truncate(text, 3500),
+        "parse_mode": "HTML",
         "reply_markup": {"inline_keyboard": []},
     });
     if let Err(e) = api(&c.token, "editMessageText", &body, 15) {
@@ -247,7 +249,7 @@ fn handle_update(app: &AppHandle, shared: &Arc<Shared>, c: &Creds, u: &Value) {
     let target = m
         .pointer("/reply_to_message/message_id")
         .and_then(Value::as_i64)
-        .and_then(|mid| shared.tg_msgs.lock().unwrap().get(&mid).cloned())
+        .and_then(|mid| shared.tg_msgs.lock().unwrap().get(&mid).map(|v| v.0.clone()))
         .or_else(|| shared.tg_last_pending.lock().unwrap().clone())
         .filter(|id| shared.pending.lock().unwrap().contains_key(id));
     let Some(id) = target else {

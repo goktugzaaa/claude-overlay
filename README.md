@@ -75,13 +75,13 @@ For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the 
 | `toasts.watchApps` | app names / AUMIDs to mirror (default `["Claude"]`); add `"Codex"`, `"ChatGPT"`, `"Cursor"` or any app whose toasts you want on top of fullscreen apps |
 | `limits.*` | which windows trigger the logo (`five_hour`, `seven_day`, `spend_limit`) and `minUsedPercentage` |
 | `interactive.enabled`, `interactive.waitMs`, `interactive.skipWhenFocused` | answer questions and permission requests from the banner; how long to wait; foreground process names that skip the wait |
-| `phone.*` | Telegram token / chat id, ntfy server / topic, `onlyWhenIdleMs`, per-event switches (`stop`, `permission`, `question`, `limit`) |
+| `phone.*` | Telegram token / chat id, ntfy server / topic, `onlyWhenIdleMs`, `sendUnansweredAfterMs`, `deferWindowMs`, `holdMs`, per-event switches (`stop`, `permission`, `question`, `limit`) |
 
 `events.log` in the same folder records everything the overlay receives. The PowerShell scripts Claude Code runs are written to `hooks\` in that folder on every start.
 
 ## Phone (Telegram / ntfy)
 
-The same banners on your phone, and permission requests and questions answered from there, with no server of your own. Off until you add a token or topic. By default it only kicks in after the PC has been idle for 3 minutes (`phone.onlyWhenIdleMs`; 0 = always).
+The same banners on your phone, and permission requests and questions answered from there, with no server of your own. Off until you add a token or topic. By default a message only goes to the phone once the PC has been idle for 3 minutes (`phone.onlyWhenIdleMs`; 0 = always): if you are at the PC when something happens, nothing is sent; if you walk away afterwards, the latest event is sent as soon as the 3 idle minutes pass (within `phone.deferWindowMs`, 15 minutes). A permission request or question that nobody answers on the PC within a minute goes to the phone even if the PC is not idle (`phone.sendUnansweredAfterMs`). While a phone channel is configured, those cards stay open for up to 8 minutes (`phone.holdMs`) so an answer from the phone can arrive; the PC card can be answered at any time.
 
 **Telegram, two-way**
 

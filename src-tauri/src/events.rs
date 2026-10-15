@@ -266,7 +266,14 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
             let title = event.get("title").and_then(Value::as_str).unwrap_or(t.code_name);
             let subtitle = with_project(t.task_done, event.get("cwd"));
             notify(app, shared, title, &subtitle, &body, "done", None);
-            phone::push(shared, PhoneMsg { kind: "stop", text: format!("✅ {title} · {subtitle}\n{body}"), buttons: vec![], pending_id: None });
+            let project = util::project_name(event.get("cwd"));
+            phone::push(shared, PhoneMsg {
+                kind: "stop",
+                text: format!("✅ {title} · {subtitle}\n{body}"),
+                html: Some(format!("✅ {}\n{}\n{}", phone::head(title, &project), phone::esc(t.task_done), phone::esc(&body))),
+                buttons: vec![],
+                pending_id: None,
+            });
         }
         "notification" => {
             let nt = event.get("notification_type").and_then(Value::as_str).unwrap_or("");
@@ -351,7 +358,12 @@ fn start_interactive(
         return;
     }
 
-    let wait_ms = config::get_u64(&cfg, "interactive.waitMs", 20000).max(3000);
+    let mut wait_ms = config::get_u64(&cfg, "interactive.waitMs", 20000).max(3000);
+    // With a phone channel configured the card stays open long enough to be answered from
+    // the phone; the PC card can still be answered at any time.
+    if phone::configured(shared) {
+        wait_ms = wait_ms.max(config::get_u64(&cfg, "phone.holdMs", 480000));
+    }
     let id = (shared.seq.fetch_add(1, Ordering::SeqCst) + 1).to_string();
     shared.pending.lock().unwrap().insert(
         id.clone(),
@@ -432,12 +444,32 @@ fn start_interactive(
             return;
         }
         let subtitle = with_project(t.question, event.get("cwd"));
+        let project = util::project_name(event.get("cwd"));
         let mut text = format!("❓ {} · {subtitle}\n", t.code_name);
+        let mut html = format!("❓ {} · {}\n", phone::head(t.code_name, &project), phone::esc(t.question));
         for q in &questions {
-            text.push_str(q.get("question").and_then(Value::as_str).unwrap_or(""));
+            let qt = q.get("question").and_then(Value::as_str).unwrap_or("");
+            let header = q.get("header").and_then(Value::as_str).unwrap_or("");
+            text.push_str(qt);
             text.push('\n');
+            if !header.is_empty() {
+                html.push_str(&format!("<b>{}</b>\n", phone::esc(header)));
+            }
+            html.push_str(&format!("{}\n", phone::esc(qt)));
+            if let Some(os) = q.get("options").and_then(Value::as_array) {
+                for (i, o) in os.iter().enumerate() {
+                    let label = o.get("label").and_then(Value::as_str).unwrap_or("");
+                    let desc = o.get("description").and_then(Value::as_str).unwrap_or("");
+                    let line = if desc.is_empty() { format!("{}. {}", i + 1, label) } else { format!("{}. {} — {}", i + 1, label, desc) };
+                    text.push_str(&line);
+                    text.push('\n');
+                    html.push_str(&format!("{}\n", phone::esc(&line)));
+                }
+            }
+            html.push('\n');
         }
         text.push_str(t.tg_hint_reply);
+        html.push_str(&format!("<i>{}</i>", phone::esc(t.tg_hint_reply)));
         let buttons: Vec<Vec<(String, String)>> = questions[0]
             .get("options")
             .and_then(Value::as_array)
@@ -455,7 +487,7 @@ fn start_interactive(
         payload["subtitle"] = json!(subtitle);
         payload["questions"] = Value::Array(questions);
         emit(app, shared, "interactive", payload);
-        phone::push(shared, PhoneMsg { kind: "question", text, buttons, pending_id: Some(id.clone()) });
+        phone::push(shared, PhoneMsg { kind: "question", text, html: Some(html), buttons, pending_id: Some(id.clone()) });
     } else {
         let subtitle = with_project(t.permission, event.get("cwd"));
         let body_text = describe_tool(
@@ -465,12 +497,14 @@ fn start_interactive(
         payload["subtitle"] = json!(subtitle);
         payload["body"] = json!(body_text);
         emit(app, shared, "interactive", payload);
+        let project = util::project_name(event.get("cwd"));
         let text = format!("🔐 {} · {subtitle}\n{body_text}", t.code_name);
+        let html = format!("🔐 {}\n{}\n<code>{}</code>", phone::head(t.code_name, &project), phone::esc(t.permission), phone::esc(&body_text));
         let buttons = vec![vec![
             (t.allow.to_string(), format!("p:{id}:a")),
             (t.deny.to_string(), format!("p:{id}:d")),
         ]];
-        phone::push(shared, PhoneMsg { kind: "permission", text, buttons, pending_id: Some(id.clone()) });
+        phone::push(shared, PhoneMsg { kind: "permission", text, html: Some(html), buttons, pending_id: Some(id.clone()) });
     }
 }
 
@@ -523,7 +557,7 @@ pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data:
             .and_then(Value::as_object)
             .and_then(|m| m.values().next())
             .and_then(Value::as_str)
-            .map(|a| format!("✓ {a}"))
+            .map(|a| format!("✓ {}", phone::esc(a)))
             .unwrap_or_else(|| "✓".to_string()),
         _ => t.tg_expired.to_string(),
     };
@@ -623,7 +657,7 @@ fn fire_reset(app: &AppHandle, shared: &Arc<Shared>, name: &str, resets_at: i64)
     }
     util::log_line(&["reset", name, &resets_at.to_string(), &format!("used={used}")]);
     show_logo(app, shared, window_label(shared, name));
-    phone::push(shared, PhoneMsg { kind: "limit", text: format!("🟠 {}", window_label(shared, name)), buttons: vec![], pending_id: None });
+    phone::push(shared, PhoneMsg { kind: "limit", text: format!("🟠 {}", window_label(shared, name)), html: Some(format!("🟠 <b>{}</b>", phone::esc(window_label(shared, name)))), buttons: vec![], pending_id: None });
 }
 
 pub fn start_limit_timer(app: AppHandle, shared: Arc<Shared>) {
@@ -830,7 +864,7 @@ fn show_toast_banner(app: &AppHandle, shared: &Arc<Shared>, app_name: &str, text
     let subtitle = if head.is_empty() { label.to_string() } else { format!("{label} · {head}") };
     let title = if app_name.is_empty() { t.app_name } else { app_name };
     notify(app, shared, title, &subtitle, &body, kind, None);
-    phone::push(shared, PhoneMsg { kind: "stop", text: format!("💬 {title} · {subtitle}\n{body}"), buttons: vec![], pending_id: None });
+    phone::push(shared, PhoneMsg { kind: "stop", text: format!("💬 {title} · {subtitle}\n{body}"), html: Some(format!("💬 <b>{}</b> · {}\n{}", phone::esc(title), phone::esc(&subtitle), phone::esc(&body))), buttons: vec![], pending_id: None });
 }
 
 // ---------------------------------------------------------------- cursor polling

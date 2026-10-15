@@ -393,7 +393,7 @@
     const tick = () => {
       if (!count.isConnected || el.classList.contains('answered')) return;
       const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-      count.textContent = `${left}s`;
+      count.textContent = left >= 90 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : `${left}s`;
       if (left > 0) el._tick = setTimeout(tick, 250);
     };
     tick();

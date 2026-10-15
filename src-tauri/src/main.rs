@@ -70,8 +70,10 @@ pub struct Shared {
     pub typing: AtomicBool,
     pub prev_foreground: AtomicIsize,
     /// Telegram message_id -> pending card id, for edits and typed replies.
-    pub tg_msgs: Mutex<HashMap<i64, String>>,
+    pub tg_msgs: Mutex<HashMap<i64, (String, String)>>,
     pub tg_last_pending: Mutex<Option<String>>,
+    /// Bumped per non-interactive phone message; a deferred one only goes out if still newest.
+    pub phone_generation: AtomicU64,
 }
 
 impl Shared {
@@ -241,6 +243,7 @@ fn main() {
         prev_foreground: AtomicIsize::new(0),
         tg_msgs: Mutex::new(HashMap::new()),
         tg_last_pending: Mutex::new(None),
+        phone_generation: AtomicU64::new(0),
     });
 
     let setup_shared = shared.clone();

@@ -85,7 +85,7 @@ fn on_menu(app: &AppHandle, shared: &Arc<Shared>, id: &str) {
         "phone_test" => {
             let t = shared.t();
             if phone::configured(shared) {
-                phone::push(shared, PhoneMsg { kind: "test", text: format!("Claude Overlay · {}", t.phone_test_sent), buttons: vec![], pending_id: None });
+                phone::push(shared, PhoneMsg { kind: "test", text: format!("Claude Overlay · {}", t.phone_test_sent), html: None, buttons: vec![], pending_id: None });
                 events::notify(app, shared, "Claude Overlay", t.phone_test_sent, "", "done", None);
             } else {
                 events::notify(app, shared, "Claude Overlay", t.phone_not_configured, "", "permission", Some(10000));

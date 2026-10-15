@@ -20,6 +20,9 @@ if (-not $raw -or -not $raw.Trim()) { $raw = '{}' }
 $interactive = ($Type -eq 'question' -or $Type -eq 'permission')
 $waitMs = 20000
 if ($cfg -and $cfg.interactive -and $cfg.interactive.waitMs) { $waitMs = [int]$cfg.interactive.waitMs }
+$holdMs = 480000
+if ($cfg -and $cfg.phone -and $cfg.phone.holdMs) { $holdMs = [int]$cfg.phone.holdMs }
+if ($holdMs -gt $waitMs) { $waitMs = $holdMs }
 
 function Send-Event([int]$timeoutMs) {
     $req = [System.Net.WebRequest]::Create("http://127.0.0.1:$port/$Type")

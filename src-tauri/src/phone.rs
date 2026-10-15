@@ -8,11 +8,28 @@ use std::time::Duration;
 pub struct PhoneMsg {
     /// "stop" | "permission" | "question" | "limit" | "test"
     pub kind: &'static str,
+    /// Plain text (ntfy, fallback).
     pub text: String,
+    /// Telegram HTML version; built with `esc` for user content.
+    pub html: Option<String>,
     /// Rows of (label, callback_data); Telegram only.
     pub buttons: Vec<Vec<(String, String)>>,
     /// The interactive card this message belongs to, if any.
     pub pending_id: Option<String>,
+}
+
+/// Escape user content for Telegram's HTML parse mode.
+pub fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// "<b>Agent</b> · <i>project</i>" header line for Telegram messages.
+pub fn head(agent: &str, project: &str) -> String {
+    if project.is_empty() {
+        format!("<b>{}</b>", esc(agent))
+    } else {
+        format!("<b>{}</b> · <i>{}</i>", esc(agent), esc(project))
+    }
 }
 
 fn ntfy_send(server: &str, topic: &str, msg: &PhoneMsg) -> Result<(), String> {
@@ -42,39 +59,87 @@ fn ntfy_send(server: &str, topic: &str, msg: &PhoneMsg) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Send to the phone if phone delivery is on, the event kind is enabled and (unless this is a
-/// test) the PC has been idle long enough.
+/// Send to the phone if phone delivery is on and the event kind is enabled. Unless this is a
+/// test, the PC must have been idle for `phone.onlyWhenIdleMs`; if it is not idle yet, the
+/// message waits (up to `phone.deferWindowMs`) and goes out the moment the PC becomes idle,
+/// as long as the card is still open and no newer event replaced it.
 pub fn push(shared: &Arc<Shared>, msg: PhoneMsg) {
     let cfg = shared.cfg();
     if !config::get_bool(&cfg, "phone.enabled", true) {
         return;
     }
-    if msg.kind != "test" {
-        if !config::get_bool(&cfg, &format!("phone.events.{}", msg.kind), true) {
-            return;
-        }
-        let idle_required = config::get_u64(&cfg, "phone.onlyWhenIdleMs", 180000);
-        if idle_required > 0 && crate::win::idle_ms() < idle_required {
-            return;
-        }
-    }
-    let has_telegram = telegram::creds(&cfg).is_some();
-    let ntfy_topic = config::get_str(&cfg, "phone.ntfy.topic")
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
-    if !has_telegram && ntfy_topic.is_none() {
+    if !configured(shared) {
         if msg.kind == "test" {
             util::log_line(&["phone-error", "not configured"]);
         }
         return;
     }
+    if msg.kind == "test" {
+        deliver(shared, msg);
+        return;
+    }
+    if !config::get_bool(&cfg, &format!("phone.events.{}", msg.kind), true) {
+        return;
+    }
+    let idle_required = config::get_u64(&cfg, "phone.onlyWhenIdleMs", 180000);
+    if idle_required == 0 || crate::win::idle_ms() >= idle_required {
+        deliver(shared, msg);
+        return;
+    }
+    let window_ms = config::get_u64(&cfg, "phone.deferWindowMs", 900000);
+    // An open card that nobody answers on the PC goes to the phone after this, idle or not.
+    let unanswered_ms = config::get_u64(&cfg, "phone.sendUnansweredAfterMs", 60000);
+    let generation = if msg.pending_id.is_none() {
+        Some(shared.phone_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1)
+    } else {
+        None
+    };
+    util::log_line(&["phone-deferred", msg.kind]);
+    let shared = shared.clone();
+    std::thread::spawn(move || {
+        let started = util::now_ms();
+        loop {
+            std::thread::sleep(Duration::from_secs(10));
+            if shared.quitting.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            if util::now_ms() - started > window_ms as i64 {
+                return;
+            }
+            if let Some(id) = &msg.pending_id {
+                if !shared.pending.lock().unwrap().contains_key(id) {
+                    return; // answered on the PC or expired
+                }
+            } else if let Some(g) = generation {
+                if shared.phone_generation.load(std::sync::atomic::Ordering::SeqCst) != g {
+                    return; // a newer event replaced this one
+                }
+            }
+            let unanswered = msg.pending_id.is_some()
+                && unanswered_ms > 0
+                && util::now_ms() - started >= unanswered_ms as i64;
+            if unanswered || crate::win::idle_ms() >= idle_required {
+                deliver(&shared, msg);
+                return;
+            }
+        }
+    });
+}
+
+fn deliver(shared: &Arc<Shared>, msg: PhoneMsg) {
+    let cfg = shared.cfg();
+    let has_telegram = telegram::creds(&cfg).is_some();
+    let ntfy_topic = config::get_str(&cfg, "phone.ntfy.topic")
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
     let shared = shared.clone();
     std::thread::spawn(move || {
         if has_telegram {
-            match telegram::send(&shared, &msg.text, &msg.buttons) {
+            let html = msg.html.clone().unwrap_or_else(|| esc(&msg.text));
+            match telegram::send(&shared, &html, &msg.buttons) {
                 Ok(mid) => {
                     if let Some(id) = &msg.pending_id {
-                        shared.tg_msgs.lock().unwrap().insert(mid, id.clone());
+                        shared.tg_msgs.lock().unwrap().insert(mid, (id.clone(), html.clone()));
                         *shared.tg_last_pending.lock().unwrap() = Some(id.clone());
                     }
                     util::log_line(&["telegram-sent", msg.kind]);
@@ -96,10 +161,14 @@ pub fn push(shared: &Arc<Shared>, msg: PhoneMsg) {
 
 /// A card was answered (on the PC or the phone) or expired: update its Telegram messages.
 pub fn resolved(shared: &Arc<Shared>, id: &str, summary: String) {
-    let mids: Vec<i64> = {
+    let mids: Vec<(i64, String)> = {
         let mut m = shared.tg_msgs.lock().unwrap();
-        let ids: Vec<i64> = m.iter().filter(|(_, v)| v.as_str() == id).map(|(k, _)| *k).collect();
-        for k in &ids {
+        let ids: Vec<(i64, String)> = m
+            .iter()
+            .filter(|(_, v)| v.0 == id)
+            .map(|(k, v)| (*k, v.1.clone()))
+            .collect();
+        for (k, _) in &ids {
             m.remove(k);
         }
         ids
@@ -115,8 +184,8 @@ pub fn resolved(shared: &Arc<Shared>, id: &str, summary: String) {
     }
     let shared = shared.clone();
     std::thread::spawn(move || {
-        for mid in mids {
-            telegram::edit(&shared, mid, &summary);
+        for (mid, html) in mids {
+            telegram::edit(&shared, mid, &format!("{html}\n\n{summary}"));
         }
     });
 }
