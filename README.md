@@ -6,7 +6,7 @@
 ![Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
 
 iPhone-style, always-on-top notifications for the **Claude desktop app** (Chat, Cowork, Code) and **Claude Code** CLI on Windows.
-Shows up over fullscreen games and videos, where Windows hides its own toasts. One 3.5 MB exe, no installer, no runtime to install.
+Shows up over fullscreen games and videos, where Windows hides its own toasts. One 4.6 MB exe, no installer, no runtime to install.
 
 ![Demo: permission answered from the overlay, question answered from the overlay, limit-reset logo, task-finished banner](docs/demo.gif)
 
