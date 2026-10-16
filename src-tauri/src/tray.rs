@@ -20,6 +20,7 @@ fn make_menu(app: &AppHandle, shared: &Shared) -> tauri::Result<Menu<Wry>> {
         .separator()
         .text("codex", if installer::codex_installed() { t.codex_disable } else { t.codex_enable })
         .text("phone_test", t.phone_test)
+        .text("remote", if crate::remote::enabled(shared) { crate::remote::s(shared).tray_disable } else { crate::remote::s(shared).tray_enable })
         .separator()
         .text("uninstall", t.uninstall)
         .text("quit", t.quit)
@@ -85,11 +86,22 @@ fn on_menu(app: &AppHandle, shared: &Arc<Shared>, id: &str) {
         "phone_test" => {
             let t = shared.t();
             if phone::configured(shared) {
-                phone::push(shared, PhoneMsg { kind: "test", text: format!("Claude Overlay · {}", t.phone_test_sent), html: None, buttons: vec![], pending_id: None });
+                phone::push(shared, PhoneMsg { urgent: false, kind: "test", text: format!("Claude Overlay · {}", t.phone_test_sent), html: None, buttons: vec![], pending_id: None });
                 events::notify(app, shared, "Claude Overlay", t.phone_test_sent, "", "done", None);
             } else {
                 events::notify(app, shared, "Claude Overlay", t.phone_not_configured, "", "permission", Some(10000));
             }
+        }
+        "remote" => {
+            let rs = crate::remote::s(shared);
+            match crate::remote::toggle(app, shared) {
+                crate::remote::Toggle::On => events::notify(app, shared, "Claude Overlay", rs.enabled_title, rs.enabled_body, "permission", Some(9000)),
+                crate::remote::Toggle::Off => events::notify(app, shared, "Claude Overlay", rs.disabled_title, "", "info", None),
+                crate::remote::Toggle::OffNotSaved => events::notify(app, shared, "Claude Overlay", rs.disabled_title, rs.off_not_saved, "permission", Some(10000)),
+                crate::remote::Toggle::NeedPairing => events::notify(app, shared, "Claude Overlay", rs.pair_first, "", "permission", Some(10000)),
+                crate::remote::Toggle::ConfigUnreadable => events::notify(app, shared, "Claude Overlay", rs.config_unreadable, "", "permission", Some(10000)),
+            }
+            rebuild_menu(app, shared);
         }
         "uninstall" => {
             installer::uninstall();

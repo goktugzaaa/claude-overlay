@@ -56,6 +56,7 @@ pub struct Strings {
     pub tg_hint_reply: &'static str,
     pub tg_answered: &'static str,
     pub tg_expired: &'static str,
+    pub tg_closed: &'static str,
     pub phone_not_configured: &'static str,
     pub phone_test_sent: &'static str,
     pub tray: TrayStrings,
@@ -102,6 +103,7 @@ pub static EN: Strings = Strings {
     tg_hint_reply: "Tap an option or reply with text.",
     tg_answered: "Answered",
     tg_expired: "⌛ Expired",
+    tg_closed: "Closed",
     phone_not_configured: "Phone not configured: add a Telegram token or an ntfy topic in config.json",
     phone_test_sent: "Test message sent to the phone",
     tray: TrayStrings {
@@ -161,6 +163,7 @@ pub static TR: Strings = Strings {
     tg_hint_reply: "Bir seçeneğe dokun ya da yazıyla cevapla.",
     tg_answered: "Cevaplandı",
     tg_expired: "⌛ Süresi doldu",
+    tg_closed: "Kapandı",
     phone_not_configured: "Telefon ayarlı değil: config.json'a Telegram token ya da ntfy topic ekle",
     phone_test_sent: "Telefona test mesajı gönderildi",
     tray: TrayStrings {

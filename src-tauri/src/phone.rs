@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub struct PhoneMsg {
+    /// Send now, ignoring the idle rule (remote sessions: the user is away by definition).
+    pub urgent: bool,
     /// "stop" | "permission" | "question" | "limit" | "test"
     pub kind: &'static str,
     /// Plain text (ntfy, fallback).
@@ -78,6 +80,12 @@ pub fn push(shared: &Arc<Shared>, msg: PhoneMsg) {
         deliver(shared, msg);
         return;
     }
+    if msg.urgent {
+        // Remote runs: the user is away and the request is denied without an answer, so the
+        // per-event switches do not apply.
+        deliver(shared, msg);
+        return;
+    }
     if !config::get_bool(&cfg, &format!("phone.events.{}", msg.kind), true) {
         return;
     }
@@ -139,8 +147,16 @@ fn deliver(shared: &Arc<Shared>, msg: PhoneMsg) {
             match telegram::send(&shared, &html, &msg.buttons) {
                 Ok(mid) => {
                     if let Some(id) = &msg.pending_id {
+                        shared.tg_card_msgs.lock().unwrap().insert(mid);
                         shared.tg_msgs.lock().unwrap().insert(mid, (id.clone(), html.clone()));
-                        *shared.tg_last_pending.lock().unwrap() = Some(id.clone());
+                        if shared.pending.lock().unwrap().contains_key(id) {
+                            shared.tg_last_pending_ms.store(util::now_ms(), std::sync::atomic::Ordering::SeqCst);
+                            *shared.tg_last_pending.lock().unwrap() = Some(id.clone());
+                        } else if shared.tg_msgs.lock().unwrap().remove(&mid).is_some() {
+                            // Closed while this message was on its way (and resolved() did not
+                            // see it): close the message right away.
+                            telegram::edit(&shared, mid, &format!("{html}\n\n{}", shared.t().tg_closed));
+                        }
                     }
                     util::log_line(&["telegram-sent", msg.kind]);
                 }

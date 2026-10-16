@@ -193,11 +193,60 @@ pub fn handle_request(
             let tool = body.get("tool_name").and_then(Value::as_str).unwrap_or("");
             util::log_line(&[kind, tool, &util::project_name(body.get("cwd"))]);
             if kind == "permission" && tool == "AskUserQuestion" {
-                // The question card covers this; a permission card for it would be noise.
-                crate::http::respond_json(req, "{}".to_string());
+                // Claude Code asks permission to show its own question picker. That happens when
+                // the PreToolUse hook did not answer (it was cancelled by its timeout, or skipped).
+                // Answering this request with allow + updatedInput.answers answers the question,
+                // so the open card for the same session moves over to this request; with no open
+                // card, a new question card is shown that answers through this request.
+                let sid = body.get("session_id").and_then(Value::as_str).map(String::from);
+                let adopt = {
+                    let pending = shared.pending.lock().unwrap();
+                    pending
+                        .iter()
+                        .find(|(_, p)| {
+                            p.kind == "question"
+                                && !p.via_permission
+                                && p.event.get("session_id").and_then(Value::as_str) == sid.as_deref()
+                                && p.event.pointer("/tool_input/questions") == body.pointer("/tool_input/questions")
+                        })
+                        .map(|(id, _)| id.clone())
+                };
+                if let Some(id) = adopt {
+                    let old = {
+                        let mut pending = shared.pending.lock().unwrap();
+                        match pending.get_mut(&id) {
+                            Some(p) => {
+                                p.via_permission = true;
+                                p.deadline_ms = p.deadline_ms.max(util::now_ms() + 60_000);
+                                Some(std::mem::replace(&mut p.req, req))
+                            }
+                            None => {
+                                drop(pending);
+                                start_interactive(app, shared, "question", body, req, true);
+                                return;
+                            }
+                        }
+                    };
+                    util::log_line(&["question-adopted", &id]);
+                    if let Some(old) = old {
+                        crate::http::respond_json(old, "{}".to_string());
+                    }
+                    return;
+                }
+                let just_expired = sid
+                    .as_deref()
+                    .and_then(|s| shared.expired_questions.lock().unwrap().get(s).copied())
+                    .map(|at| util::now_ms() - at < 60_000)
+                    .unwrap_or(false);
+                if just_expired {
+                    // Nobody answered the card in time: let Claude Code's own picker take over.
+                    crate::http::respond_json(req, "{}".to_string());
+                    return;
+                }
+                start_interactive(app, shared, "question", body, req, true);
                 return;
             }
-            start_interactive(app, shared, kind, body, req);
+            start_interactive(app, shared, kind, body, req, false);
         }
         "test-question" => start_interactive(
             app,
@@ -217,6 +266,7 @@ pub fn handle_request(
                 }]}
             }),
             req,
+            false,
         ),
         "test-permission" => start_interactive(
             app,
@@ -224,6 +274,7 @@ pub fn handle_request(
             "permission",
             json!({"cwd": "C:/demo/project", "tool_name": "Bash", "tool_input": {"command": "npm install && npm run build"}}),
             req,
+            false,
         ),
         _ => {
             handle_event(app, shared, kind, &body);
@@ -269,7 +320,11 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
             let subtitle = with_project(t.task_done, event.get("cwd"));
             notify(app, shared, title, &subtitle, &body, "done", None);
             let project = util::project_name(event.get("cwd"));
+            if crate::remote::is_remote_session(shared, event.get("session_id").and_then(Value::as_str)) {
+                return; // the remote runner reports this run's result itself
+            }
             phone::push(shared, PhoneMsg {
+                urgent: false,
                 kind: "stop",
                 text: format!("✅ {title} · {subtitle}\n{body}"),
                 html: Some(format!("✅ {}\n{}\n{}", phone::head(title, &project), phone::esc(t.task_done), phone::esc(&body))),
@@ -321,6 +376,10 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
         "test-logo" => show_logo(app, shared, t.limit_five_hour),
         "reload-config" => {
             shared.reload_config();
+            if !crate::remote::enabled(shared) {
+                crate::remote::stop_running(app, shared, false);
+                crate::remote::clear_selection(shared);
+            }
             crate::tray::rebuild_menu(app, shared);
             let _ = app.emit("config", shared.cfg());
         }
@@ -337,11 +396,15 @@ fn start_interactive(
     kind: &str,
     event: Value,
     req: tiny_http::Request,
+    via_permission: bool,
 ) {
     let cfg = shared.cfg();
     let t = shared.t();
+    // A remote run has nobody at its terminal: its cards always show and always reach the
+    // phone, whatever the local switches say, or the request would be denied silently.
+    let remote = crate::remote::is_remote_session(shared, event.get("session_id").and_then(Value::as_str));
     let enabled_key = if kind == "question" { "events.question" } else { "events.permission_request" };
-    if !config::get_bool(&cfg, enabled_key, true) {
+    if !remote && !config::get_bool(&cfg, enabled_key, true) {
         crate::http::respond_json(req, "{}".to_string());
         return;
     }
@@ -354,7 +417,7 @@ fn start_interactive(
     let active_ms = config::get_u64(&cfg, "interactive.skipOnlyIfActiveMs", 30000);
     let at_pc = active_ms == 0 || crate::win::idle_ms() < active_ms;
     let focus_skip = !phone::configured(shared) && at_pc && skip.iter().any(|s| s.eq_ignore_ascii_case(&fg));
-    if !config::get_bool(&cfg, "interactive.enabled", true) || focus_skip {
+    if !remote && (!config::get_bool(&cfg, "interactive.enabled", true) || focus_skip) {
         // The Claude app / a terminal is in front: its own dialog is visible, answer there.
         util::log_line(&[&format!("{kind}-skip"), if fg.is_empty() { "disabled" } else { &fg }]);
         shared.last_hook_banner_ms.store(util::now_ms(), Ordering::SeqCst);
@@ -374,7 +437,7 @@ fn start_interactive(
     let id = (shared.seq.fetch_add(1, Ordering::SeqCst) + 1).to_string();
     shared.pending.lock().unwrap().insert(
         id.clone(),
-        Pending { req, kind: kind.to_string(), event: event.clone(), deadline_ms: util::now_ms() + wait_ms as i64 },
+        Pending { req, kind: kind.to_string(), event: event.clone(), deadline_ms: util::now_ms() + wait_ms as i64, via_permission, partial: serde_json::Map::new() },
     );
     shared.last_hook_banner_ms.store(util::now_ms(), Ordering::SeqCst);
     if kind == "permission" {
@@ -414,7 +477,8 @@ fn start_interactive(
             .map(|qs| {
                 qs.iter()
                     .filter_map(|q| {
-                        let question = util::clean_message(q.get("question").and_then(Value::as_str).unwrap_or(""));
+                        let raw = q.get("question").and_then(Value::as_str).unwrap_or("");
+                        let question = util::clean_message(raw);
                         if question.is_empty() {
                             return None;
                         }
@@ -438,6 +502,8 @@ fn start_interactive(
                             .unwrap_or_default();
                         Some(json!({
                             "question": question,
+                            // Claude Code matches answers by the exact original question text.
+                            "key": raw,
                             "header": q.get("header").and_then(Value::as_str).unwrap_or(""),
                             "multiSelect": q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
                             "options": options,
@@ -451,50 +517,13 @@ fn start_interactive(
             return;
         }
         let subtitle = with_project(t.question, event.get("cwd"));
-        let project = util::project_name(event.get("cwd"));
-        let mut text = format!("❓ {} · {subtitle}\n", t.code_name);
-        let mut html = format!("❓ {} · {}\n", phone::head(t.code_name, &project), phone::esc(t.question));
-        for q in &questions {
-            let qt = q.get("question").and_then(Value::as_str).unwrap_or("");
-            let header = q.get("header").and_then(Value::as_str).unwrap_or("");
-            text.push_str(qt);
-            text.push('\n');
-            if !header.is_empty() {
-                html.push_str(&format!("<b>{}</b>\n", phone::esc(header)));
-            }
-            html.push_str(&format!("{}\n", phone::esc(qt)));
-            if let Some(os) = q.get("options").and_then(Value::as_array) {
-                for (i, o) in os.iter().enumerate() {
-                    let label = o.get("label").and_then(Value::as_str).unwrap_or("");
-                    let desc = o.get("description").and_then(Value::as_str).unwrap_or("");
-                    let line = if desc.is_empty() { format!("{}. {}", i + 1, label) } else { format!("{}. {} — {}", i + 1, label, desc) };
-                    text.push_str(&line);
-                    text.push('\n');
-                    html.push_str(&format!("{}\n", phone::esc(&line)));
-                }
-            }
-            html.push('\n');
-        }
-        text.push_str(t.tg_hint_reply);
-        html.push_str(&format!("<i>{}</i>", phone::esc(t.tg_hint_reply)));
-        let buttons: Vec<Vec<(String, String)>> = questions[0]
-            .get("options")
-            .and_then(Value::as_array)
-            .map(|os| {
-                os.iter()
-                    .enumerate()
-                    .filter_map(|(i, o)| {
-                        o.get("label")
-                            .and_then(Value::as_str)
-                            .map(|l| vec![(l.to_string(), format!("q:{id}:{i}"))])
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let (text, html, buttons) = phone_question(shared, &id, &event, 0).unwrap_or_default();
         payload["subtitle"] = json!(subtitle);
         payload["questions"] = Value::Array(questions);
         emit(app, shared, "interactive", payload);
-        phone::push(shared, PhoneMsg { kind: "question", text, html: Some(html), buttons, pending_id: Some(id.clone()) });
+        let urgent = crate::remote::is_remote_session(shared, event.get("session_id").and_then(Value::as_str));
+        phone::push(shared, PhoneMsg { urgent, kind: "question", text, html: Some(html), buttons, pending_id: Some(id.clone()) });
+
     } else {
         let subtitle = with_project(t.permission, event.get("cwd"));
         let body_text = describe_tool(
@@ -511,8 +540,50 @@ fn start_interactive(
             (t.allow.to_string(), format!("p:{id}:a")),
             (t.deny.to_string(), format!("p:{id}:d")),
         ]];
-        phone::push(shared, PhoneMsg { kind: "permission", text, html: Some(html), buttons, pending_id: Some(id.clone()) });
+        let urgent = crate::remote::is_remote_session(shared, event.get("session_id").and_then(Value::as_str));
+        phone::push(shared, PhoneMsg { urgent, kind: "permission", text, html: Some(html), buttons, pending_id: Some(id.clone()) });
     }
+}
+
+/// Phone message for question `qi` of a question card: (plain text, Telegram HTML, buttons).
+/// Multi-question cards go to the phone one question at a time.
+pub fn phone_question(shared: &Shared, id: &str, event: &Value, qi: usize) -> Option<(String, String, Vec<Vec<(String, String)>>)> {
+    let t = shared.t();
+    let qs = event.pointer("/tool_input/questions").and_then(Value::as_array)?;
+    let total = qs.len();
+    let q = qs.get(qi)?;
+    let project = util::project_name(event.get("cwd"));
+    let question = util::clean_message(q.get("question").and_then(Value::as_str).unwrap_or(""));
+    let header = q.get("header").and_then(Value::as_str).unwrap_or("");
+    let progress = if total > 1 { format!(" · {}/{}", qi + 1, total) } else { String::new() };
+    let mut text = format!("❓ {} · {}{progress}\n", t.code_name, t.question);
+    let mut html = format!("❓ {} · {}{progress}\n", phone::head(t.code_name, &project), phone::esc(t.question));
+    if !header.is_empty() {
+        html.push_str(&format!("<b>{}</b>\n", phone::esc(header)));
+    }
+    text.push_str(&question);
+    text.push('\n');
+    html.push_str(&format!("{}\n", phone::esc(&question)));
+    let mut buttons = Vec::new();
+    if let Some(os) = q.get("options").and_then(Value::as_array) {
+        for (i, o) in os.iter().enumerate() {
+            let label = o.get("label").and_then(Value::as_str).unwrap_or("");
+            if label.is_empty() {
+                continue;
+            }
+            let desc = o.get("description").and_then(Value::as_str).unwrap_or("");
+            let line = if desc.is_empty() { format!("{}. {}", i + 1, label) } else { format!("{}. {} — {}", i + 1, label, desc) };
+            text.push_str(&line);
+            text.push('\n');
+            html.push_str(&format!("{}\n", phone::esc(&line)));
+            buttons.push(vec![(util::truncate(label, 60), format!("q:{id}:{qi}:{i}"))]);
+        }
+    }
+    // Claude's question tool always accepts a typed answer.
+    buttons.push(vec![(format!("✍️ {}", t.other), format!("qo:{id}:{qi}"))]);
+    text.push_str(t.tg_hint_reply);
+    html.push_str(&format!("\n<i>{}</i>", phone::esc(t.tg_hint_reply)));
+    Some((text, html, buttons))
 }
 
 /// Resolve a pending card: `data` is the click ({answers} or {behavior}); None = timeout.
@@ -528,11 +599,18 @@ pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data:
                     updated = json!({});
                 }
                 updated["answers"] = answers.clone();
-                out = json!({"hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "updatedInput": updated,
-                }});
+                out = if p.via_permission {
+                    json!({"hookSpecificOutput": {
+                        "hookEventName": "PermissionRequest",
+                        "decision": {"behavior": "allow", "updatedInput": updated},
+                    }})
+                } else {
+                    json!({"hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "updatedInput": updated,
+                    }})
+                };
             }
         } else if let Some(b) = d.get("behavior").and_then(Value::as_str) {
             if b == "allow" {
@@ -543,6 +621,13 @@ pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data:
         }
     }
     let answered = out.as_object().map(|o| !o.is_empty()).unwrap_or(false);
+    if !answered && p.kind == "question" && !p.via_permission {
+        if let Some(sid) = p.event.get("session_id").and_then(Value::as_str) {
+            let mut ex = shared.expired_questions.lock().unwrap();
+            ex.retain(|_, at| util::now_ms() - *at < 120_000);
+            ex.insert(sid.to_string(), util::now_ms());
+        }
+    }
     util::log_line(&[
         &format!("{}-answer", p.kind),
         &data.as_ref().map(|d| util::truncate(&d.to_string(), 200)).unwrap_or_else(|| "timeout".to_string()),
@@ -562,9 +647,20 @@ pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data:
         ("question", Some(d)) => d
             .get("answers")
             .and_then(Value::as_object)
-            .and_then(|m| m.values().next())
-            .and_then(Value::as_str)
-            .map(|a| format!("✓ {}", phone::esc(a)))
+            .map(|m| {
+                // In question order (the map itself is sorted by key).
+                let order: Vec<String> = p
+                    .event
+                    .pointer("/tool_input/questions")
+                    .and_then(Value::as_array)
+                    .map(|qs| qs.iter().filter_map(|q| q.get("question").and_then(Value::as_str).map(String::from)).collect())
+                    .unwrap_or_default();
+                let mut all: Vec<String> = order.iter().filter_map(|k| m.get(k)).filter_map(Value::as_str).map(phone::esc).collect();
+                if all.is_empty() {
+                    all = m.values().filter_map(Value::as_str).map(phone::esc).collect();
+                }
+                format!("✓ {}", all.join(" · "))
+            })
             .unwrap_or_else(|| "✓".to_string()),
         _ => t.tg_expired.to_string(),
     };
@@ -598,7 +694,7 @@ fn window_label(shared: &Shared, name: &str) -> &'static str {
     }
 }
 
-fn handle_status(app: &AppHandle, shared: &Arc<Shared>, status: &Value) {
+pub fn handle_status(app: &AppHandle, shared: &Arc<Shared>, status: &Value) {
     let Some(rl) = status.get("rate_limits").and_then(Value::as_object) else { return };
     let mut expired: Vec<(String, i64)> = Vec::new();
     {
@@ -664,7 +760,7 @@ fn fire_reset(app: &AppHandle, shared: &Arc<Shared>, name: &str, resets_at: i64)
     }
     util::log_line(&["reset", name, &resets_at.to_string(), &format!("used={used}")]);
     show_logo(app, shared, window_label(shared, name));
-    phone::push(shared, PhoneMsg { kind: "limit", text: format!("🟠 {}", window_label(shared, name)), html: Some(format!("🟠 <b>{}</b>", phone::esc(window_label(shared, name)))), buttons: vec![], pending_id: None });
+    phone::push(shared, PhoneMsg { urgent: false, kind: "limit", text: format!("🟠 {}", window_label(shared, name)), html: Some(format!("🟠 <b>{}</b>", phone::esc(window_label(shared, name)))), buttons: vec![], pending_id: None });
 }
 
 pub fn start_limit_timer(app: AppHandle, shared: Arc<Shared>) {
@@ -871,7 +967,7 @@ fn show_toast_banner(app: &AppHandle, shared: &Arc<Shared>, app_name: &str, text
     let subtitle = if head.is_empty() { label.to_string() } else { format!("{label} · {head}") };
     let title = if app_name.is_empty() { t.app_name } else { app_name };
     notify(app, shared, title, &subtitle, &body, kind, None);
-    phone::push(shared, PhoneMsg { kind: "stop", text: format!("💬 {title} · {subtitle}\n{body}"), html: Some(format!("💬 <b>{}</b> · {}\n{}", phone::esc(title), phone::esc(&subtitle), phone::esc(&body))), buttons: vec![], pending_id: None });
+    phone::push(shared, PhoneMsg { urgent: false, kind: "stop", text: format!("💬 {title} · {subtitle}\n{body}"), html: Some(format!("💬 <b>{}</b> · {}\n{}", phone::esc(title), phone::esc(&subtitle), phone::esc(&body))), buttons: vec![], pending_id: None });
 }
 
 // ---------------------------------------------------------------- cursor polling
@@ -920,8 +1016,25 @@ pub fn start_cursor_poll(app: AppHandle, shared: Arc<Shared>) {
 
 // ---------------------------------------------------------------- lifecycle
 
+/// Close every open card that belongs to this session (its run was stopped or ended), so it
+/// neither blocks its hook for minutes nor captures later Telegram messages.
+pub fn cancel_pending_for_session(app: &AppHandle, shared: &Arc<Shared>, session_id: &str) {
+    let ids: Vec<String> = shared
+        .pending
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, p)| p.event.get("session_id").and_then(Value::as_str) == Some(session_id))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in ids {
+        finish_interactive(app, shared, &id, None);
+    }
+}
+
 pub fn quit(app: &AppHandle, shared: &Arc<Shared>) {
     shared.quitting.store(true, Ordering::SeqCst);
+    crate::remote::shutdown(app, shared);
     let ids: Vec<String> = shared.pending.lock().unwrap().keys().cloned().collect();
     for id in ids {
         finish_interactive(app, shared, &id, None);

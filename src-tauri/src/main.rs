@@ -8,6 +8,9 @@
 //      AskUserQuestion (both answerable from the banner), Notification.
 //   3. Claude Code status line (rate_limits): limit-reset timers.
 //
+//   4. Remote sessions (remote.rs): the paired Telegram chat can start or continue Claude
+//      Code sessions; the overlay runs `claude -p` headless and relays the result.
+//
 // CLI: ClaudeOverlay.exe [--install | --uninstall | --send <type>]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -18,6 +21,7 @@ mod http;
 mod i18n;
 mod installer;
 mod phone;
+mod remote;
 mod telegram;
 mod tray;
 mod util;
@@ -25,7 +29,7 @@ mod win;
 
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
@@ -37,6 +41,12 @@ pub struct Pending {
     pub event: Value,
     /// Unix ms; the hook gets an empty reply when this passes. Typing an answer extends it.
     pub deadline_ms: i64,
+    /// A question card answered through a PermissionRequest hook (the PreToolUse hook was
+    /// cancelled or skipped): the answer is sent back in PermissionRequest form.
+    pub via_permission: bool,
+    /// Answers collected so far when a multi-question card is answered on the phone, one
+    /// question at a time (question text -> answer).
+    pub partial: serde_json::Map<String, Value>,
 }
 
 /// Clickable area of an interactive card, in CSS pixels of the overlay page.
@@ -72,8 +82,25 @@ pub struct Shared {
     /// Telegram message_id -> pending card id, for edits and typed replies.
     pub tg_msgs: Mutex<HashMap<i64, (String, String)>>,
     pub tg_last_pending: Mutex<Option<String>>,
+    /// When the newest card reached the phone (unix ms); compared with remote activity to
+    /// decide whether plain text answers the card or goes to the remote session.
+    pub tg_last_pending_ms: AtomicI64,
+    /// Every Telegram message id that ever carried a card, open or closed.
+    pub tg_card_msgs: Mutex<HashSet<i64>>,
+    /// session id -> when its PreToolUse question card expired unanswered (unix ms), so the
+    /// PermissionRequest that follows does not bring the same question back as a new card.
+    pub expired_questions: Mutex<HashMap<String, i64>>,
+    /// (card id, question index) after "Other…" was tapped on the phone: the next text
+    /// message is the typed answer to that question.
+    pub tg_await_text: Mutex<Option<(String, usize)>>,
+    /// Force-reply prompt message id -> (card id, question index) it asked about.
+    pub tg_prompt_msgs: Mutex<HashMap<i64, (String, usize)>>,
     /// Bumped per non-interactive phone message; a deferred one only goes out if still newest.
     pub phone_generation: AtomicU64,
+    /// Remote sessions driven from the phone (see remote.rs).
+    pub remote: Mutex<remote::RemoteState>,
+    /// Session ids of remote runs: their cards go to the phone at once, their Stop is not relayed.
+    pub remote_sessions: Mutex<HashSet<String>>,
 }
 
 impl Shared {
@@ -91,6 +118,8 @@ impl Shared {
         *self.lang.lock().unwrap() = strings;
         *self.lang_code.lock().unwrap() = code;
         *self.config.lock().unwrap() = c;
+        // Language or remote switch may have changed: refresh the bot's command menu.
+        self.remote.lock().unwrap().commands_registered = false;
     }
 }
 
@@ -228,7 +257,9 @@ fn main() {
         lang_code: Mutex::new(code),
         state: Mutex::new(events::load_state()),
         pending: Mutex::new(HashMap::new()),
-        seq: AtomicU64::new(0),
+        // Card ids are part of Telegram button data: start from the clock so a button left over
+        // from before a restart can never match a new card.
+        seq: AtomicU64::new(util::now_ms().max(0) as u64),
         hot_rects: Mutex::new(Vec::new()),
         capturing: AtomicBool::new(false),
         active_items: AtomicI64::new(0),
@@ -243,7 +274,14 @@ fn main() {
         prev_foreground: AtomicIsize::new(0),
         tg_msgs: Mutex::new(HashMap::new()),
         tg_last_pending: Mutex::new(None),
+        tg_last_pending_ms: AtomicI64::new(0),
+        tg_card_msgs: Mutex::new(HashSet::new()),
+        expired_questions: Mutex::new(HashMap::new()),
+        tg_await_text: Mutex::new(None),
+        tg_prompt_msgs: Mutex::new(HashMap::new()),
         phone_generation: AtomicU64::new(0),
+        remote: Mutex::new(remote::RemoteState::new()),
+        remote_sessions: Mutex::new(HashSet::new()),
     });
 
     let setup_shared = shared.clone();

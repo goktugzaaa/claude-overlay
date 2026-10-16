@@ -435,7 +435,7 @@
             return;
           }
           row.classList.add('sel');
-          answers[q.question] = o.label;
+          answers[q.key || q.question] = o.label;
           setTimeout(next, 120);
         });
         list.appendChild(row);
@@ -456,8 +456,8 @@
           const v = input.value.trim();
           if (!v) return;
           window.overlay.focusInput(false);
-          if (q.multiSelect) { selected.add(v); answers[q.question] = [...selected].join(', '); }
-          else { answers[q.question] = v; }
+          if (q.multiSelect) { selected.add(v); answers[q.key || q.question] = [...selected].join(', '); }
+          else { answers[q.key || q.question] = v; }
           next();
         };
         box.querySelector('.btn').addEventListener('click', submit);
@@ -479,7 +479,7 @@
         actions.innerHTML = `<button class="btn primary">${escapeHtml(p.labels.ok)}</button>`;
         actions.querySelector('.btn').addEventListener('click', () => {
           if (!selected.size) return;
-          answers[q.question] = [...selected].join(', ');
+          answers[q.key || q.question] = [...selected].join(', ');
           next();
         });
         panel.appendChild(actions);

@@ -57,7 +57,7 @@ When the same moment produces both a hook event and a toast, only one banner is 
 
 ### Answering from the banner
 
-For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the overlay open for `interactive.waitMs` (default 20 s). A click on **Allow**, **Deny** or an option is returned as the hook's JSON output (`decision` / `updatedInput.answers`), so Claude Code proceeds immediately. No click → the hook returns nothing and Claude Code's normal dialog appears. Without a phone channel, a focused Claude window, terminal or IDE while you are at the PC (input within the last 30 s, `interactive.skipOnlyIfActiveMs`) skips the card (`interactive.skipWhenFocused`), because you can see the dialog anyway. With a phone channel configured the card always shows: a question often arrives seconds after you sent the prompt, and only an open card can be relayed to the phone later. The overlay is click-through except over a card with buttons. It takes keyboard focus only while you type into the **Other…** field (the wait extends to 3 minutes for that) and hands focus back to the window that had it as soon as you send or press Esc.
+For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the overlay open for `interactive.waitMs` (default 20 s; up to `phone.holdMs`, 8 minutes, when a phone channel is set up). The hooks are installed with a timeout longer than that, and the overlay repairs a shorter one on start; if Claude Code still gives up on the question hook, the open card moves over to the permission request Claude Code sends next, so the answer still arrives. Answers are keyed by the exact question text, so questions with Markdown or special characters are matched correctly. A click on **Allow**, **Deny** or an option is returned as the hook's JSON output (`decision` / `updatedInput.answers`), so Claude Code proceeds immediately. No click → the hook returns nothing and Claude Code's normal dialog appears. Without a phone channel, a focused Claude window, terminal or IDE while you are at the PC (input within the last 30 s, `interactive.skipOnlyIfActiveMs`) skips the card (`interactive.skipWhenFocused`), because you can see the dialog anyway. With a phone channel configured the card always shows: a question often arrives seconds after you sent the prompt, and only an open card can be relayed to the phone later. The overlay is click-through except over a card with buttons. It takes keyboard focus only while you type into the **Other…** field (the wait extends to 3 minutes for that) and hands focus back to the window that had it as soon as you send or press Esc.
 
 ![Chat toast mirrored by the overlay](docs/chat-toast.png)
 
@@ -75,6 +75,7 @@ For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the 
 | `toasts.watchApps` | app names / AUMIDs to mirror (default `["Claude"]`); add `"Codex"`, `"ChatGPT"`, `"Cursor"` or any app whose toasts you want on top of fullscreen apps |
 | `limits.*` | which windows trigger the logo (`five_hour`, `seven_day`, `spend_limit`) and `minUsedPercentage` |
 | `interactive.enabled`, `interactive.waitMs`, `interactive.skipWhenFocused` | answer questions and permission requests from the banner; how long to wait; foreground process names that skip the wait |
+| `remote.*` | remote sessions: `enabled`, `claudePath`, `model`, `permissionMode`, `projects`, `maxRunMinutes`, `busyGuardSeconds` |
 | `phone.*` | Telegram token / chat id, ntfy server / topic, `onlyWhenIdleMs`, `sendUnansweredAfterMs`, `deferWindowMs`, `holdMs`, per-event switches (`stop`, `permission`, `question`, `limit`) |
 
 `events.log` in the same folder records everything the overlay receives. The PowerShell scripts Claude Code runs are written to `hooks\` in that folder on every start.
@@ -88,13 +89,29 @@ The same banners on your phone, and permission requests and questions answered f
 1. In Telegram open **@BotFather**, send `/newbot`, pick a name; copy the token.
 2. Tray → *Open config file* → put the token in `phone.telegram.token`, save, tray → *Reload config*.
 3. Open the chat with your new bot and send `/start`. The overlay pairs itself with that chat.
-4. Permission requests arrive with **Allow / Deny** buttons and questions with their options; a tap answers exactly like a click on the PC card. A typed reply answers a question with free text (`allow` / `deny`, `evet` / `hayır` work for permissions). Whichever side answers first wins; the PC card shows "Sent" and the Telegram message is updated.
+4. Permission requests arrive with **Allow / Deny** buttons and questions with their options; a tap answers exactly like a click on the PC card. A card with several questions goes through them one at a time (1/3, 2/3, …). **✍️ Other…** opens Telegram's reply box for a typed answer; replying to a card works too (`allow` / `deny`, `evet` / `hayır` for permissions). Whichever side answers first wins; the PC card shows "Sent" and the Telegram message is updated.
 
 **ntfy, one-way**
 
 Install the ntfy app, subscribe to a long random topic name, put it in `phone.ntfy.topic` (`phone.ntfy.server` for a self-hosted ntfy). Banners arrive as push notifications, without buttons.
 
 Tray → *Phone: send test message* checks the setup, ignoring the idle rule. Messages pass through Telegram's or ntfy's servers; the bot token lives only in your config.json.
+
+## Remote sessions from the phone (Telegram)
+
+With Telegram set up, the paired chat can also **start a new Claude Code session** in a project, or **send a message to an existing session**, while you are away. Off by default: tray → *Phone: remote sessions*.
+
+| Command | What it does |
+|---|---|
+| `/new` | pick a project (one the PC has already opened in Claude Code, or listed in `remote.projects`); your next message starts a session there |
+| `/sessions` | pick one of the recent sessions; your next message goes to it |
+| `/status`, `/stop` | what is running; stop it (kills the process tree) |
+| `/exit` | clear the selection |
+| `/model [name]` | model for remote runs (`/model default` = your Claude Code default) |
+
+After a run, just reply to continue the same session. The overlay runs `claude -p --output-format stream-json` (the Claude Code CLI must be installed; `remote.claudePath` if it is not found), keeps one status message updated with the current step, and sends the final answer. Permission requests from a remote run go to the phone at once with **Allow / Deny**; with no answer the tool is denied. In headless mode Claude cannot open its question picker, so it asks in plain text and you answer by replying.
+
+Safety: only the paired chat is obeyed; the working directory always comes from the known-project list, never from message text; the prompt goes to the CLI on stdin, never through a shell; `remote.permissionMode` accepts only `default`, `acceptEdits`, `plan` and `auto` (never a mode that skips permission prompts); one run at a time, stopped after `remote.maxRunMinutes` (30). Messages, results and your Telegram bot token pass through Telegram's servers, so do not use this on code you would not paste into a chat. A session that changed in the last 90 seconds (`remote.busyGuardSeconds`) is probably open on the PC; sending to it asks for confirmation, because Claude Code has no lock and the two conversations would interleave. For live control of a session that stays open in the Claude app, Claude's own Remote Control is the better fit.
 
 ## Compatibility
 

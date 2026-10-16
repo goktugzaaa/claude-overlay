@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 /// Bump when the set of hooks changes so existing installs re-run the installer.
-pub const INSTALL_VERSION: u64 = 5;
+pub const INSTALL_VERSION: u64 = 6;
 const MARKERS: [&str; 3] = [
     "claude-overlay-",
     "claude-notification/hooks/",
@@ -158,14 +158,23 @@ pub fn install() -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     let exe = current_exe();
 
-    let mut cfg = util::read_json(&util::config_path()).unwrap_or_else(|| json!({}));
-    if !cfg.is_object() {
-        cfg = json!({});
-    }
+    let mut cfg = match util::read_json(&util::config_path()) {
+        Some(v) if v.is_object() => v,
+        _ if util::config_path().exists() => {
+            return Err("config.json could not be read, so nothing was changed".to_string());
+        }
+        _ => json!({}),
+    };
 
     let settings_file = settings_path();
     let _ = std::fs::create_dir_all(claude_dir());
-    let mut settings = util::read_json(&settings_file).unwrap_or_else(|| json!({}));
+    let mut settings = match util::read_json(&settings_file) {
+        Some(v) => v,
+        None if settings_file.exists() => {
+            return Err("settings.json could not be read, so it was not changed".to_string());
+        }
+        None => json!({}),
+    };
     if !settings.is_object() {
         settings = json!({});
     }
@@ -192,10 +201,8 @@ pub fn install() -> Result<Vec<String>, String> {
     // Interactive: the hook waits up to interactive.waitMs for a click on the overlay and
     // returns the answer / decision. With no click it prints nothing and Claude Code's own
     // dialog proceeds.
-    let merged = config::load();
     // Generous: a typed answer or an answer from the phone can take a while.
-    let hold = config::get_u64(&merged, "phone.holdMs", 480000).max(config::get_u64(&merged, "interactive.waitMs", 20000));
-    let hook_timeout = (hold + 999) / 1000 + 260;
+    let hook_timeout = expected_hook_timeout();
     push_hook(
         &mut settings,
         "PermissionRequest",
@@ -272,14 +279,22 @@ pub fn install() -> Result<Vec<String>, String> {
 pub fn uninstall() -> Vec<String> {
     let mut lines = Vec::new();
     let settings_file = settings_path();
-    let mut settings = util::read_json(&settings_file).unwrap_or_else(|| json!({}));
-    if !settings.is_object() {
-        settings = json!({});
-    }
-    let mut cfg = util::read_json(&util::config_path()).unwrap_or_else(|| json!({}));
-    if !cfg.is_object() {
-        cfg = json!({});
-    }
+    let mut settings = match util::read_json(&settings_file) {
+        Some(v) if v.is_object() => v,
+        _ if settings_file.exists() => {
+            lines.push("settings.json could not be read, so it was not changed.".to_string());
+            return lines;
+        }
+        _ => json!({}),
+    };
+    let mut cfg = match util::read_json(&util::config_path()) {
+        Some(v) if v.is_object() => v,
+        _ if util::config_path().exists() => {
+            lines.push("config.json could not be read, so nothing was changed.".to_string());
+            return lines;
+        }
+        _ => json!({}),
+    };
     strip_our_hooks(&mut settings);
     let ours = settings
         .get("statusLine")
@@ -355,10 +370,13 @@ pub fn install_codex() -> Result<String, String> {
     if path.exists() && !backup.exists() {
         let _ = std::fs::copy(&path, &backup);
     }
-    let mut cfg = util::read_json(&util::config_path()).unwrap_or_else(|| json!({}));
-    if !cfg.is_object() {
-        cfg = json!({});
-    }
+    let mut cfg = match util::read_json(&util::config_path()) {
+        Some(v) if v.is_object() => v,
+        _ if util::config_path().exists() => {
+            return Err("config.json could not be read, so nothing was changed".to_string());
+        }
+        _ => json!({}),
+    };
     let mut kept: Vec<&str> = Vec::new();
     let mut in_table = false;
     for line in text.lines() {
@@ -410,11 +428,51 @@ pub fn uninstall_codex() -> String {
     "Codex notify removed.".to_string()
 }
 
+/// Seconds the question/permission hooks may run: longer than the longest card hold plus
+/// the time a typed answer may take, so Claude Code never cancels a hook that is waiting.
+pub fn expected_hook_timeout() -> u64 {
+    let merged = config::load();
+    let hold = config::get_u64(&merged, "phone.holdMs", 480000).max(config::get_u64(&merged, "interactive.waitMs", 20000));
+    (hold + 999) / 1000 + 260
+}
+
+/// Our PreToolUse(AskUserQuestion) and PermissionRequest hooks exist with a long enough timeout.
+fn hooks_healthy() -> bool {
+    let path = settings_path();
+    let Some(settings) = util::read_json(&path) else {
+        // An existing settings.json that does not parse (a typo, or caught mid-write) is
+        // never rewritten from here: report healthy and leave it alone.
+        if path.exists() {
+            util::log_line(&["install-skip", "settings.json unreadable"]);
+            return true;
+        }
+        return false;
+    };
+    let want = expected_hook_timeout();
+    let ok = |event: &str| -> bool {
+        settings
+            .pointer(&format!("/hooks/{event}"))
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries.iter().any(|e| {
+                    e.get("hooks").and_then(Value::as_array).map(|hs| {
+                        hs.iter().any(|h| {
+                            is_our_command(h.get("command").unwrap_or(&Value::Null))
+                                && h.get("timeout").and_then(Value::as_u64).unwrap_or(0) >= want
+                        })
+                    }).unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    };
+    ok("PreToolUse") && ok("PermissionRequest")
+}
+
 pub fn is_installed() -> bool {
     let Some(cfg) = util::read_json(&util::config_path()) else {
         return false;
     };
     let version = cfg.get("installedVersion").and_then(Value::as_u64);
     let exe = cfg.get("overlayExe").and_then(Value::as_str).unwrap_or("");
-    version == Some(INSTALL_VERSION) && exe == current_exe().to_string_lossy()
+    version == Some(INSTALL_VERSION) && exe == current_exe().to_string_lossy() && hooks_healthy()
 }

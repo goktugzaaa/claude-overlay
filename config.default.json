@@ -43,6 +43,15 @@
     "telegram": { "token": "", "chatId": "" },
     "ntfy": { "server": "https://ntfy.sh", "topic": "" }
   },
+  "remote": {
+    "enabled": false,
+    "claudePath": "",
+    "model": "",
+    "permissionMode": "default",
+    "projects": [],
+    "maxRunMinutes": 30,
+    "busyGuardSeconds": 90
+  },
   "limits": {
     "five_hour": true,
     "seven_day": true,
