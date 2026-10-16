@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Overlay window: events and invoke",
+  "description": "Overlay window: receive events from the host (the page's own commands need no permission)",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

@@ -1,8 +1,9 @@
 //! Everything that turns an incoming signal into something on screen: hook events,
 //! interactive cards (question / permission), mirrored toasts, limit-reset timers and the
 //! cursor polling that makes cards clickable.
+use crate::http::HookReq;
 use crate::phone::{self, PhoneMsg};
-use crate::{config, i18n, installer, util, Pending, Shared};
+use crate::{config, i18n, installer, mask, util, Pending, Shared};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
@@ -12,6 +13,12 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const WINDOW_HEIGHT_LOGICAL: f64 = 640.0;
+
+/// Open interactive cards at most; more requests get `{}` (Claude Code shows its own dialog).
+const MAX_PENDING: usize = 16;
+/// Permission card text limits (C5): the PC card scrolls, the phone message must stay short.
+pub const CARD_TEXT_PC: usize = 1200;
+pub const CARD_TEXT_PHONE: usize = 900;
 
 fn num_i64(v: &Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
@@ -75,7 +82,32 @@ pub fn show_overlay(app: &AppHandle, shared: &Shared) {
 pub fn emit(app: &AppHandle, shared: &Shared, channel: &str, payload: Value) {
     shared.active_items.fetch_add(1, Ordering::SeqCst);
     show_overlay(app, shared);
+    emit_page(app, shared, channel, payload);
+}
+
+/// Send an event to the page. Tauri drops events nobody listens to yet, so until the page
+/// says it is ready (a hook may start the overlay and post a card at once) they are queued.
+fn emit_page(app: &AppHandle, shared: &Shared, channel: &str, payload: Value) {
+    {
+        let mut queue = shared.early_emits.lock().unwrap();
+        if !shared.page_ready.load(Ordering::SeqCst) {
+            queue.push((channel.to_string(), payload));
+            return;
+        }
+    }
     let _ = app.emit(channel, payload);
+}
+
+/// The page has registered its listeners (or the fallback timer gave up waiting): deliver
+/// everything that arrived before, in order.
+pub fn page_ready(app: &AppHandle, shared: &Shared) {
+    let mut queue = shared.early_emits.lock().unwrap();
+    if shared.page_ready.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    for (channel, payload) in queue.drain(..) {
+        let _ = app.emit(&channel, payload);
+    }
 }
 
 pub fn notify(
@@ -130,10 +162,130 @@ fn with_project(label: &str, cwd: Option<&Value>) -> String {
     }
 }
 
-/// Human-readable one-liner for a tool call (permission requests).
+/// Invisible and bidi control characters that could hide or reorder what a card shows
+/// (Trojan Source), plus control characters other than newline and tab.
+fn hidden_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD | 0x061C | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xFEFF | 0x2028 | 0x2029
+    ) || (c.is_control() && c != '\n' && c != '\t')
+}
+
+/// Make hidden characters visible as ⟦U+XXXX⟧ (a "\r\n" pair stays a plain line break).
+pub fn reveal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.replace("\r\n", "\n").chars() {
+        if hidden_char(c) {
+            out.push_str(&format!("⟦U+{:04X}⟧", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Cut `s` to `limit` chars; a cut is never silent.
+pub fn cut(s: &str, limit: usize) -> String {
+    let total = s.chars().count();
+    if total <= limit {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(limit).collect();
+    out.push_str(&format!("… (+{} more chars)", total - limit));
+    out
+}
+
+/// What a permission card asks to run, in full (C5): line breaks kept, hidden characters
+/// made visible, Write/Edit content previewed, every field of MCP and unknown tools listed,
+/// cut to `limit` chars with a visible marker. The PC card and the phone both use this.
+pub fn permission_text(name: &str, input: Option<&Value>, limit: usize) -> String {
+    let obj = input.and_then(Value::as_object);
+    let s = |k: &str| obj.and_then(|o| o.get(k)).and_then(Value::as_str).unwrap_or("");
+    let first = |keys: &[&str]| keys.iter().map(|k| s(k)).find(|v| !v.is_empty()).unwrap_or("");
+    // One field per line: a value's own line breaks must not look like another field.
+    let one_line = |v: &str| v.replace("\r\n", "\n").replace('\n', "⏎");
+    let text = match name {
+        "Bash" | "PowerShell" => format!("{name}: {}", first(&["command", "description"])),
+        "Write" => {
+            let content = s("content");
+            format!("Write: {} ({} chars)\n{}", first(&["file_path", "path"]), content.chars().count(), cut(content, 300))
+        }
+        "Edit" => {
+            let all = obj.and_then(|o| o.get("replace_all")).and_then(Value::as_bool) == Some(true);
+            format!(
+                "Edit: {}{}\n− {}\n+ {}",
+                s("file_path"),
+                if all { " (all occurrences)" } else { "" },
+                cut(s("old_string"), 200),
+                cut(s("new_string"), 200)
+            )
+        }
+        "MultiEdit" => {
+            let edits = obj.and_then(|o| o.get("edits")).and_then(Value::as_array);
+            let n = edits.map_or(0, Vec::len);
+            let mut t = format!("MultiEdit: {} ({n} edits)", s("file_path"));
+            for e in edits.into_iter().flatten().take(3) {
+                let es = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("");
+                t.push_str(&format!("\n− {}\n+ {}", cut(es("old_string"), 120), cut(es("new_string"), 120)));
+            }
+            if n > 3 {
+                t.push_str(&format!("\n… (+{} more edits)", n - 3));
+            }
+            t
+        }
+        "NotebookEdit" => {
+            let mode = s("edit_mode");
+            let mut t = format!("NotebookEdit: {}", s("notebook_path"));
+            if !mode.is_empty() {
+                t.push_str(&format!(" ({mode})"));
+            }
+            let src = s("new_source");
+            if !src.is_empty() {
+                t.push('\n');
+                t.push_str(&cut(src, 300));
+            }
+            t
+        }
+        "Read" => format!("Read: {}", first(&["file_path", "notebook_path"])),
+        "WebFetch" => format!("WebFetch: {}", s("url")),
+        "WebSearch" => format!("WebSearch: {}", s("query")),
+        "Agent" | "Task" => {
+            let prompt = s("prompt");
+            let mut t = format!("{name}: {}", s("description"));
+            if !prompt.is_empty() {
+                t.push('\n');
+                t.push_str(&cut(prompt, 300));
+            }
+            t
+        }
+        "Glob" | "Grep" => {
+            let path = s("path");
+            if path.is_empty() {
+                format!("{name}: {}", s("pattern"))
+            } else {
+                format!("{name}: {} · {path}", s("pattern"))
+            }
+        }
+        _ => {
+            let mut t = if name.is_empty() { "tool".to_string() } else { name.to_string() };
+            for (k, v) in obj.into_iter().flatten() {
+                let value = match v {
+                    Value::String(x) => x.clone(),
+                    other => other.to_string(),
+                };
+                t.push_str(&format!("\n{}: {}", cut(&one_line(k), 60), cut(&one_line(&value), 200)));
+            }
+            t
+        }
+    };
+    cut(&reveal(&text), limit)
+}
+
+/// Human-readable one-liner for a tool call (logs and remote progress lines).
 pub fn describe_tool(name: &str, input: Option<&Value>) -> String {
     let obj = input.and_then(Value::as_object);
-    let short = |s: &str| util::truncate(&s.split_whitespace().collect::<Vec<_>>().join(" "), 160);
+    // Masked before cutting, so a secret at the cut is never left partly visible.
+    let short = |s: &str| util::truncate(&mask::secrets(&s.split_whitespace().collect::<Vec<_>>().join(" ")), 160);
     let field = |keys: &[&str]| -> String {
         keys.iter()
             .find_map(|k| obj.and_then(|o| o.get(*k)).and_then(Value::as_str).map(short))
@@ -155,7 +307,7 @@ pub fn describe_tool(name: &str, input: Option<&Value>) -> String {
                 Some(s) => format!("{name}: {s}"),
                 None => match obj {
                     Some(o) if !o.is_empty() => {
-                        format!("{name}: {}", util::truncate(&Value::Object(o.clone()).to_string(), 160))
+                        format!("{name}: {}", util::truncate(&mask::secrets(&Value::Object(o.clone()).to_string()), 160))
                     }
                     _ => name.to_string(),
                 },
@@ -164,30 +316,9 @@ pub fn describe_tool(name: &str, input: Option<&Value>) -> String {
     }
 }
 
-pub fn health_json(shared: &Shared) -> Value {
-    json!({
-        "ok": true,
-        "pid": std::process::id(),
-        "packaged": true,
-        "engine": "tauri",
-        "lang": *shared.lang_code.lock().unwrap(),
-        "listener": shared.listener_status.lock().unwrap().clone(),
-        "foreground": shared.foreground.lock().unwrap().clone(),
-        "pending": shared.pending.lock().unwrap().len(),
-        "windows": shared.state.lock().unwrap().get("windows").cloned().unwrap_or_else(|| json!({})),
-        "now": util::now_secs(),
-    })
-}
-
 // ---------------------------------------------------------------- requests from hooks
 
-pub fn handle_request(
-    app: &AppHandle,
-    shared: &Arc<Shared>,
-    kind: &str,
-    body: Value,
-    req: tiny_http::Request,
-) {
+pub fn handle_request(app: &AppHandle, shared: &Arc<Shared>, kind: &str, body: Value, req: HookReq) {
     match kind {
         "question" | "permission" => {
             let tool = body.get("tool_name").and_then(Value::as_str).unwrap_or("");
@@ -222,7 +353,7 @@ pub fn handle_request(
                             }
                             None => {
                                 drop(pending);
-                                start_interactive(app, shared, "question", body, req, true);
+                                start_interactive(app, shared, "question", body, req, true, false);
                                 return;
                             }
                         }
@@ -243,10 +374,10 @@ pub fn handle_request(
                     crate::http::respond_json(req, "{}".to_string());
                     return;
                 }
-                start_interactive(app, shared, "question", body, req, true);
+                start_interactive(app, shared, "question", body, req, true, false);
                 return;
             }
-            start_interactive(app, shared, kind, body, req, false);
+            start_interactive(app, shared, kind, body, req, false, false);
         }
         "test-question" => start_interactive(
             app,
@@ -267,6 +398,7 @@ pub fn handle_request(
             }),
             req,
             false,
+            true,
         ),
         "test-permission" => start_interactive(
             app,
@@ -275,6 +407,7 @@ pub fn handle_request(
             json!({"cwd": "C:/demo/project", "tool_name": "Bash", "tool_input": {"command": "npm install && npm run build"}}),
             req,
             false,
+            true,
         ),
         _ => {
             handle_event(app, shared, kind, &body);
@@ -287,7 +420,14 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
     let cfg = shared.cfg();
     let t = shared.t();
     if kind == "status" {
-        util::log_line(&["status", &summarize_limits(event.get("status"))]);
+        // The status line posts on every refresh: log only when the limits change.
+        static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        let summary = summarize_limits(event.get("status"));
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if *last != summary {
+            util::log_line(&["status", &summary]);
+            *last = summary;
+        }
     } else {
         util::log_line(&[
             kind,
@@ -307,14 +447,12 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
                 return;
             }
             shared.last_hook_banner_ms.store(util::now_ms(), Ordering::SeqCst);
-            let body = if config::get_bool(&cfg, "notification.showLastMessage", true) {
-                util::truncate(
-                    &util::clean_message(event.get("last_assistant_message").and_then(Value::as_str).unwrap_or("")),
-                    180,
-                )
+            let full = if config::get_bool(&cfg, "notification.showLastMessage", true) {
+                util::clean_message(event.get("last_assistant_message").and_then(Value::as_str).unwrap_or(""))
             } else {
                 String::new()
             };
+            let body = util::truncate(&full, 180);
             // Adapters for other agents (Codex) send their own title.
             let title = event.get("title").and_then(Value::as_str).unwrap_or(t.code_name);
             let subtitle = with_project(t.task_done, event.get("cwd"));
@@ -323,11 +461,13 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
             if crate::remote::is_remote_session(shared, event.get("session_id").and_then(Value::as_str)) {
                 return; // the remote runner reports this run's result itself
             }
+            // Masked before cutting: a secret that straddles the cut is still recognised whole.
+            let (title, body) = (mask::secrets(title), util::truncate(&mask::secrets(&full), 180));
             phone::push(shared, PhoneMsg {
                 urgent: false,
                 kind: "stop",
                 text: format!("✅ {title} · {subtitle}\n{body}"),
-                html: Some(format!("✅ {}\n{}\n{}", phone::head(title, &project), phone::esc(t.task_done), phone::esc(&body))),
+                html: Some(format!("✅ {}\n{}\n{}", phone::head(&title, &project), phone::esc(t.task_done), phone::esc(&body))),
                 buttons: vec![],
                 pending_id: None,
             });
@@ -380,8 +520,9 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
                 crate::remote::stop_running(app, shared, false);
                 crate::remote::clear_selection(shared);
             }
+            // The page needs no config: never hand it the phone token or remote settings.
             crate::tray::rebuild_menu(app, shared);
-            let _ = app.emit("config", shared.cfg());
+            crate::telegram::on_reload(app, shared);
         }
         "quit" => quit(app, shared),
         _ => {}
@@ -395,11 +536,19 @@ fn start_interactive(
     shared: &Arc<Shared>,
     kind: &str,
     event: Value,
-    req: tiny_http::Request,
+    req: HookReq,
     via_permission: bool,
+    // A test card (`--send test-question`): shown even with the terminal that sent it in front.
+    test: bool,
 ) {
     let cfg = shared.cfg();
     let t = shared.t();
+    if shared.pending.lock().unwrap().len() >= MAX_PENDING {
+        // Too many open cards (a request flood): leave this one to Claude Code's own dialog.
+        util::log_line(&["pending-cap", kind]);
+        crate::http::respond_json(req, "{}".to_string());
+        return;
+    }
     // A remote run has nobody at its terminal: its cards always show and always reach the
     // phone, whatever the local switches say, or the request would be denied silently.
     let remote = crate::remote::is_remote_session(shared, event.get("session_id").and_then(Value::as_str));
@@ -416,7 +565,9 @@ fn start_interactive(
     // seconds after you sent the prompt, and only an open card can reach the phone later.
     let active_ms = config::get_u64(&cfg, "interactive.skipOnlyIfActiveMs", 30000);
     let at_pc = active_ms == 0 || crate::win::idle_ms() < active_ms;
-    let focus_skip = !phone::configured(shared) && at_pc && skip.iter().any(|s| s.eq_ignore_ascii_case(&fg));
+    // Only a phone channel that is on, ready and wants this kind of card changes the rules.
+    let phone_hold = phone::configured(shared) && config::get_bool(&cfg, &format!("phone.events.{kind}"), true);
+    let focus_skip = !test && !phone_hold && at_pc && skip.iter().any(|s| s.eq_ignore_ascii_case(&fg));
     if !remote && (!config::get_bool(&cfg, "interactive.enabled", true) || focus_skip) {
         // The Claude app / a terminal is in front: its own dialog is visible, answer there.
         util::log_line(&[&format!("{kind}-skip"), if fg.is_empty() { "disabled" } else { &fg }]);
@@ -431,7 +582,7 @@ fn start_interactive(
     let mut wait_ms = config::get_u64(&cfg, "interactive.waitMs", 20000).max(3000);
     // With a phone channel configured the card stays open long enough to be answered from
     // the phone; the PC card can still be answered at any time.
-    if phone::configured(shared) {
+    if phone_hold || remote {
         wait_ms = wait_ms.max(config::get_u64(&cfg, "phone.holdMs", 480000));
     }
     let id = (shared.seq.fetch_add(1, Ordering::SeqCst) + 1).to_string();
@@ -447,15 +598,42 @@ fn start_interactive(
         let app = app.clone();
         let shared = shared.clone();
         let id = id.clone();
-        std::thread::spawn(move || loop {
-            let remaining = shared.pending.lock().unwrap().get(&id).map(|p| p.deadline_ms - util::now_ms());
-            match remaining {
-                None => return,
-                Some(r) if r <= 0 => {
+        std::thread::spawn(move || {
+            let mut next_check = util::now_ms() + 2000;
+            // (pid, since when) of a hook found gone.
+            let mut gone: Option<(u32, i64)> = None;
+            loop {
+                let state = shared
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .map(|p| (p.deadline_ms - util::now_ms(), p.req.pid, p.kind == "question" && !p.via_permission));
+                let Some((remaining, pid, adoptable)) = state else { return };
+                if remaining <= 0 {
                     finish_interactive(&app, &shared, &id, None);
                     return;
                 }
-                Some(r) => std::thread::sleep(Duration::from_millis(r.clamp(10, 1000) as u64)),
+                let now = util::now_ms();
+                if pid != 0 && now >= next_check {
+                    next_check = now + 2000;
+                    if crate::win::process_alive(pid) {
+                        gone = None;
+                    } else {
+                        // A PreToolUse question whose hook timed out is normally picked up by
+                        // the PermissionRequest that follows (with a new hook): give it a moment.
+                        let since = match gone {
+                            Some((p, at)) if p == pid => at,
+                            _ => now,
+                        };
+                        gone = Some((pid, since));
+                        if !adoptable || now - since >= 4000 {
+                            close_orphaned(&app, &shared, &id, pid);
+                            return;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(remaining.clamp(10, 1000) as u64));
             }
         });
     }
@@ -526,16 +704,15 @@ fn start_interactive(
 
     } else {
         let subtitle = with_project(t.permission, event.get("cwd"));
-        let body_text = describe_tool(
-            event.get("tool_name").and_then(Value::as_str).unwrap_or(""),
-            event.get("tool_input"),
-        );
+        let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
         payload["subtitle"] = json!(subtitle);
-        payload["body"] = json!(body_text);
+        // The PC card shows the text unmasked: the user must see what they approve.
+        payload["body"] = json!(permission_text(tool, event.get("tool_input"), CARD_TEXT_PC));
         emit(app, shared, "interactive", payload);
         let project = util::project_name(event.get("cwd"));
+        let body_text = cut(&mask::secrets(&permission_text(tool, event.get("tool_input"), usize::MAX)), CARD_TEXT_PHONE);
         let text = format!("🔐 {} · {subtitle}\n{body_text}", t.code_name);
-        let html = format!("🔐 {}\n{}\n<code>{}</code>", phone::head(t.code_name, &project), phone::esc(t.permission), phone::esc(&body_text));
+        let html = format!("🔐 {}\n{}\n<pre>{}</pre>", phone::head(t.code_name, &project), phone::esc(t.permission), phone::esc(&body_text));
         let buttons = vec![vec![
             (t.allow.to_string(), format!("p:{id}:a")),
             (t.deny.to_string(), format!("p:{id}:d")),
@@ -553,13 +730,17 @@ pub fn phone_question(shared: &Shared, id: &str, event: &Value, qi: usize) -> Op
     let total = qs.len();
     let q = qs.get(qi)?;
     let project = util::project_name(event.get("cwd"));
-    let question = util::clean_message(q.get("question").and_then(Value::as_str).unwrap_or(""));
-    let header = q.get("header").and_then(Value::as_str).unwrap_or("");
+    // Raw text is cut before escaping, so the message stays far below Telegram's limit.
+    let question = cut(&mask::secrets(&util::clean_message(q.get("question").and_then(Value::as_str).unwrap_or(""))), 1500);
+    let header = cut(&mask::secrets(q.get("header").and_then(Value::as_str).unwrap_or("")), 100);
+    // Multi-select: options are ticked one by one and sent with Done.
+    let multi = q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false);
+    let ticked = if multi { crate::telegram::multi_selected(id, qi) } else { Vec::new() };
     let progress = if total > 1 { format!(" · {}/{}", qi + 1, total) } else { String::new() };
     let mut text = format!("❓ {} · {}{progress}\n", t.code_name, t.question);
     let mut html = format!("❓ {} · {}{progress}\n", phone::head(t.code_name, &project), phone::esc(t.question));
     if !header.is_empty() {
-        html.push_str(&format!("<b>{}</b>\n", phone::esc(header)));
+        html.push_str(&format!("<b>{}</b>\n", phone::esc(&header)));
     }
     text.push_str(&question);
     text.push('\n');
@@ -573,16 +754,27 @@ pub fn phone_question(shared: &Shared, id: &str, event: &Value, qi: usize) -> Op
             }
             let desc = o.get("description").and_then(Value::as_str).unwrap_or("");
             let line = if desc.is_empty() { format!("{}. {}", i + 1, label) } else { format!("{}. {} — {}", i + 1, label, desc) };
+            let line = cut(&mask::secrets(&line), 300);
             text.push_str(&line);
             text.push('\n');
             html.push_str(&format!("{}\n", phone::esc(&line)));
-            buttons.push(vec![(util::truncate(label, 60), format!("q:{id}:{qi}:{i}"))]);
+            let shown = util::truncate(&mask::secrets(label), 60);
+            if multi {
+                let mark = if ticked.contains(&i) { "☑" } else { "☐" };
+                buttons.push(vec![(format!("{mark} {shown}"), format!("qm:{id}:{qi}:{i}"))]);
+            } else {
+                buttons.push(vec![(shown, format!("q:{id}:{qi}:{i}"))]);
+            }
         }
+    }
+    if multi {
+        buttons.push(vec![(format!("✓ {} ({})", t.tg_done, ticked.len()), format!("qd:{id}:{qi}"))]);
     }
     // Claude's question tool always accepts a typed answer.
     buttons.push(vec![(format!("✍️ {}", t.other), format!("qo:{id}:{qi}"))]);
-    text.push_str(t.tg_hint_reply);
-    html.push_str(&format!("\n<i>{}</i>", phone::esc(t.tg_hint_reply)));
+    let hint = if multi { t.tg_hint_multi } else { t.tg_hint_reply };
+    text.push_str(hint);
+    html.push_str(&format!("\n<i>{}</i>", phone::esc(hint)));
     Some((text, html, buttons))
 }
 
@@ -616,7 +808,7 @@ pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data:
             if b == "allow" {
                 out = json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}});
             } else if b == "deny" {
-                out = json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "Denied from Claude Overlay"}}});
+                out = json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "Denied from HeadsUp"}}});
             }
         }
     }
@@ -628,12 +820,15 @@ pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data:
             ex.insert(sid.to_string(), util::now_ms());
         }
     }
-    util::log_line(&[
-        &format!("{}-answer", p.kind),
-        &data.as_ref().map(|d| util::truncate(&d.to_string(), 200)).unwrap_or_else(|| "timeout".to_string()),
-    ]);
+    // Only what happened, never the answer text: typed answers stay out of the log.
+    let outcome = match (&data, p.kind.as_str()) {
+        (None, _) => "timeout".to_string(),
+        (Some(d), "permission") => d.get("behavior").and_then(Value::as_str).unwrap_or("none").to_string(),
+        (Some(d), _) => format!("answered={}", d.get("answers").and_then(Value::as_object).map_or(0, |m| m.len())),
+    };
+    util::log_line(&[&format!("{}-answer", p.kind), id, &outcome]);
     crate::http::respond_json(p.req, out.to_string());
-    let _ = app.emit("resolve", json!({"id": id, "answered": answered}));
+    emit_page(app, shared, "resolve", json!({"id": id, "answered": answered}));
     util::log_line(&["resolve-sent", id]);
     let t = shared.t();
     let summary = match (p.kind.as_str(), data.as_ref().filter(|_| answered)) {
@@ -655,9 +850,10 @@ pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data:
                     .and_then(Value::as_array)
                     .map(|qs| qs.iter().filter_map(|q| q.get("question").and_then(Value::as_str).map(String::from)).collect())
                     .unwrap_or_default();
-                let mut all: Vec<String> = order.iter().filter_map(|k| m.get(k)).filter_map(Value::as_str).map(phone::esc).collect();
+                let shown = |a: &str| phone::esc(&cut(&mask::secrets(a), 300));
+                let mut all: Vec<String> = order.iter().filter_map(|k| m.get(k)).filter_map(Value::as_str).map(shown).collect();
                 if all.is_empty() {
-                    all = m.values().filter_map(Value::as_str).map(phone::esc).collect();
+                    all = m.values().filter_map(Value::as_str).map(shown).collect();
                 }
                 format!("✓ {}", all.join(" · "))
             })
@@ -667,15 +863,38 @@ pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data:
     phone::resolved(shared, id, summary);
 }
 
+/// The hook behind a card has exited: the request was answered or cancelled in the
+/// terminal. Close the card without a reply, on the PC and on the phone.
+fn close_orphaned(app: &AppHandle, shared: &Arc<Shared>, id: &str, pid: u32) {
+    let p = {
+        let mut pending = shared.pending.lock().unwrap();
+        // Adopted by a newer hook meanwhile: that one is alive.
+        if pending.get(id).map(|p| p.req.pid) != Some(pid) {
+            return;
+        }
+        pending.remove(id)
+    };
+    let Some(p) = p else { return };
+    util::log_line(&["card-closed", id, &p.kind, "hook-exited"]);
+    drop(p);
+    emit_page(app, shared, "resolve", json!({"id": id, "answered": true}));
+    phone::resolved(shared, id, shared.t().tg_closed.to_string());
+}
+
 // ---------------------------------------------------------------- limits
+
+/// Rate-limit windows the status line reports; any other name is ignored.
+pub const LIMIT_WINDOWS: [&str; 5] = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "spend_limit"];
 
 pub fn load_state() -> Value {
     let mut st = util::read_json(&util::state_path()).unwrap_or_else(|| json!({}));
     if !st.is_object() {
         st = json!({});
     }
-    if !st.get("windows").map(Value::is_object).unwrap_or(false) {
-        st["windows"] = json!({});
+    match st.get_mut("windows").and_then(Value::as_object_mut) {
+        // Drop windows an older version accepted from anyone.
+        Some(ws) => ws.retain(|k, _| LIMIT_WINDOWS.contains(&k.as_str())),
+        None => st["windows"] = json!({}),
     }
     st
 }
@@ -703,8 +922,13 @@ pub fn handle_status(app: &AppHandle, shared: &Arc<Shared>, status: &Value) {
             st["windows"] = json!({});
         }
         let windows = st["windows"].as_object_mut().unwrap();
-        for (name, info) in rl {
+        let now = util::now_secs();
+        for (name, info) in rl.iter().filter(|(n, _)| LIMIT_WINDOWS.contains(&n.as_str())) {
             let Some(incoming) = info.get("resets_at").and_then(num_i64) else { continue };
+            // Not a real window: long past, or further ahead than any limit period.
+            if incoming < now - 86_400 || incoming > now + 40 * 86_400 {
+                continue;
+            }
             let w = windows.entry(name.clone()).or_insert_with(|| json!({}));
             if !w.is_object() {
                 *w = json!({});
@@ -721,7 +945,7 @@ pub fn handle_status(app: &AppHandle, shared: &Arc<Shared>, status: &Value) {
                 w["usedPercentage"] = json!(0);
             }
             w["resetsAt"] = json!(incoming);
-            if let Some(used) = info.get("used_percentage").and_then(Value::as_f64) {
+            if let Some(used) = info.get("used_percentage").and_then(Value::as_f64).filter(|u| (0.0..=100.0).contains(u)) {
                 let cur = w.get("usedPercentage").and_then(Value::as_f64).unwrap_or(0.0);
                 w["usedPercentage"] = json!(used.max(cur));
             }
@@ -822,7 +1046,7 @@ pub fn start_toast_listener(app: AppHandle, shared: Arc<Shared>) {
             *shared.listener_status.lock().unwrap() = "disabled".to_string();
             return;
         }
-        let script = util::hooks_dir().join("claude-overlay-toast-listener.ps1");
+        let script = util::hooks_dir().join("headsup-toast-listener.ps1");
         if !script.exists() {
             *shared.listener_status.lock().unwrap() = "missing".to_string();
             return;
@@ -892,7 +1116,7 @@ fn handle_listener_line(app: &AppHandle, shared: &Arc<Shared>, line: &str) {
             util::log_line(&["listener-access", status]);
             if !allowed {
                 let t = shared.t();
-                notify(app, shared, "Claude Overlay", t.access_denied, t.access_denied_body, "permission", Some(12000));
+                notify(app, shared, "HeadsUp", t.access_denied, t.access_denied_body, "permission", Some(12000));
             }
         }
         "error" => util::log_line(&[
@@ -912,17 +1136,22 @@ fn handle_toast(app: &AppHandle, shared: &Arc<Shared>, msg: &Value) {
     }
     let app_name = msg.get("app").and_then(Value::as_str).unwrap_or("").to_string();
     let aumid = msg.get("aumid").and_then(Value::as_str).unwrap_or("");
-    let hay = format!("{app_name} {aumid}").to_lowercase();
-    if !watch.iter().any(|w| hay.contains(&w.to_lowercase())) {
-        util::log_line(&["toast-skip", &app_name]);
-        return;
+    // Exact app name or app id (case-insensitive): "Claude" must not also match "Claude Helper".
+    let (name_l, aumid_l) = (app_name.trim().to_lowercase(), aumid.trim().to_lowercase());
+    let watched = watch.iter().any(|w| {
+        let w = w.trim().to_lowercase();
+        !w.is_empty() && (w == name_l || w == aumid_l)
+    });
+    if !watched {
+        return; // other apps' toasts are none of our business, not even in the log
     }
     let texts: Vec<String> = msg
         .get("texts")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).filter(|s| !s.is_empty()).map(String::from).collect())
         .unwrap_or_default();
-    util::log_line(&["toast", &app_name, &util::truncate(&texts.join(" | "), 200)]);
+    let chars: usize = texts.iter().map(|s| s.chars().count()).sum();
+    util::log_line(&["toast", &app_name, &format!("chars={chars}")]);
 
     let dedupe = config::get_u64(&cfg, "toasts.dedupeWindowMs", 6000) as i64;
     if util::now_ms() - shared.last_hook_banner_ms.load(Ordering::SeqCst) < dedupe {
@@ -967,6 +1196,7 @@ fn show_toast_banner(app: &AppHandle, shared: &Arc<Shared>, app_name: &str, text
     let subtitle = if head.is_empty() { label.to_string() } else { format!("{label} · {head}") };
     let title = if app_name.is_empty() { t.app_name } else { app_name };
     notify(app, shared, title, &subtitle, &body, kind, None);
+    let (subtitle, body) = (mask::secrets(&subtitle), mask::secrets(&body));
     phone::push(shared, PhoneMsg { urgent: false, kind: "stop", text: format!("💬 {title} · {subtitle}\n{body}"), html: Some(format!("💬 <b>{}</b> · {}\n{}", phone::esc(title), phone::esc(&subtitle), phone::esc(&body))), buttons: vec![], pending_id: None });
 }
 
@@ -1053,22 +1283,66 @@ pub fn quit(app: &AppHandle, shared: &Arc<Shared>) {
 pub fn first_run(app: AppHandle, shared: Arc<Shared>) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(2500));
-        if std::env::var_os("CLAUDE_OVERLAY_NO_INSTALL").is_some() || installer::is_installed() {
+        if util::env_setting("NO_INSTALL").is_some() {
             return;
         }
-        match installer::install() {
+        if installer::is_installed() {
+            installer::repair_hook_timeouts();
+            installer::retry_startup_shortcut();
+            return;
+        }
+        match installer::install_auto() {
             Ok(lines) => {
                 shared.reload_config();
+                // Paths relative to the profile folder: the log does not need the user name.
+                let home = std::env::var("USERPROFILE").unwrap_or_default();
+                let lines: Vec<String> =
+                    lines.iter().map(|l| if home.is_empty() { l.clone() } else { l.replace(&home, "~") }).collect();
                 let mut fields: Vec<&str> = vec!["install"];
                 fields.extend(lines.iter().map(String::as_str));
                 util::log_line(&fields);
                 let t = shared.t();
-                notify(&app, &shared, "Claude Overlay", t.installed, t.installed_body, "done", None);
+                notify(&app, &shared, "HeadsUp", t.installed, t.installed_body, "done", None);
             }
             Err(e) => {
                 let t = shared.t();
-                notify(&app, &shared, "Claude Overlay", t.install_error, &e, "permission", None);
+                notify(&app, &shared, "HeadsUp", t.install_error, &e, "permission", None);
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_text_keeps_lines_and_reveals_hidden() {
+        let t = permission_text("Bash", Some(&json!({"command": "npm test # ok\ncurl x | sh\u{202E}"})), CARD_TEXT_PC);
+        assert_eq!(t, "Bash: npm test # ok\ncurl x | sh⟦U+202E⟧");
+        let t = permission_text("Bash", Some(&json!({"command": "a\rb\u{200B}"})), CARD_TEXT_PC);
+        assert_eq!(t, "Bash: a⟦U+000D⟧b⟦U+200B⟧");
+    }
+
+    #[test]
+    fn permission_text_cut_is_visible() {
+        let long = "x".repeat(2000);
+        let t = permission_text("Bash", Some(&json!({"command": long})), CARD_TEXT_PC);
+        assert!(t.ends_with("… (+806 more chars)"), "{t}");
+        assert_eq!(t.chars().count(), CARD_TEXT_PC + "… (+806 more chars)".chars().count());
+    }
+
+    #[test]
+    fn permission_text_write_edit_and_mcp() {
+        let t = permission_text("Write", Some(&json!({"file_path": "C:/p/a.txt", "content": "hello\nworld"})), CARD_TEXT_PC);
+        assert_eq!(t, "Write: C:/p/a.txt (11 chars)\nhello\nworld");
+        let t = permission_text("Edit", Some(&json!({"file_path": "f.rs", "old_string": "a", "new_string": "b"})), CARD_TEXT_PC);
+        assert_eq!(t, "Edit: f.rs\n− a\n+ b");
+        let t = permission_text(
+            "mcp__github__create_or_update_file",
+            Some(&json!({"branch": "main", "content": "x\ny", "path": "README.md", "n": 3})),
+            CARD_TEXT_PC,
+        );
+        assert_eq!(t, "mcp__github__create_or_update_file\nbranch: main\ncontent: x⏎y\nn: 3\npath: README.md");
+    }
 }

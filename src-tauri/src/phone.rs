@@ -1,7 +1,8 @@
 //! Phone delivery: decides whether an event goes to the phone (opt-in, and by default only
 //! while the PC has been idle for a while) and fans it out to Telegram and/or ntfy.
-use crate::{config, telegram, util, Shared};
+use crate::{config, mask, telegram, util, Shared};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,8 +21,14 @@ pub struct PhoneMsg {
     pub pending_id: Option<String>,
 }
 
-/// Escape user content for Telegram's HTML parse mode.
+/// Escape user content for Telegram's HTML parse mode. Every piece of user content bound
+/// for Telegram passes through here, so secrets are masked here too (masking twice is safe).
 pub fn esc(s: &str) -> String {
+    esc_raw(&mask::secrets(s))
+}
+
+/// Escape only, for text that was masked as a whole already.
+pub fn esc_raw(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
@@ -34,11 +41,26 @@ pub fn head(agent: &str, project: &str) -> String {
     }
 }
 
-fn ntfy_send(server: &str, topic: &str, msg: &PhoneMsg) -> Result<(), String> {
+/// A topic anyone could guess: short, or plain words (no digits or capitals).
+fn weak_topic(topic: &str) -> bool {
+    let t = topic.trim();
+    t.chars().count() < 16 || !t.chars().any(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+}
+
+/// Warning for the phone test (and, once, the log): on a public ntfy server the topic name is
+/// all that keeps the messages private, unless an access token is set.
+pub fn ntfy_warning(shared: &Shared) -> Option<&'static str> {
+    let cfg = shared.cfg();
+    let topic = config::get_str(&cfg, "phone.ntfy.topic").unwrap_or_default();
+    let token = config::get_str(&cfg, "phone.ntfy.token").unwrap_or_default();
+    (!topic.trim().is_empty() && token.trim().is_empty() && weak_topic(&topic)).then(|| shared.t().ntfy_weak)
+}
+
+fn ntfy_send(server: &str, topic: &str, token: Option<&str>, msg: &PhoneMsg) -> Result<(), String> {
     let url = format!("{}/", server.trim_end_matches('/'));
     let mut lines = msg.text.splitn(2, '\n');
-    let title = lines.next().unwrap_or("").to_string();
-    let body = lines.next().unwrap_or("").to_string();
+    let title = mask::secrets(lines.next().unwrap_or(""));
+    let body = mask::secrets(lines.next().unwrap_or(""));
     // ntfy JSON publishing wants a numeric priority (1 min .. 5 max).
     let priority: u8 = if msg.kind == "permission" || msg.kind == "question" { 4 } else { 3 };
     let tags: Vec<&str> = match msg.kind {
@@ -54,11 +76,12 @@ fn ntfy_send(server: &str, topic: &str, msg: &PhoneMsg) -> Result<(), String> {
         "priority": priority,
         "tags": tags,
     });
-    ureq::post(&url)
-        .timeout(Duration::from_secs(10))
-        .send_json(payload)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let mut req = ureq::post(&url).timeout(Duration::from_secs(10));
+    // Reserved topics and self-hosted servers with access control need a token.
+    if let Some(token) = token {
+        req = req.set("Authorization", &format!("Bearer {token}"));
+    }
+    req.send_json(payload).map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Send to the phone if phone delivery is on and the event kind is enabled. Unless this is a
@@ -136,10 +159,14 @@ pub fn push(shared: &Arc<Shared>, msg: PhoneMsg) {
 
 fn deliver(shared: &Arc<Shared>, msg: PhoneMsg) {
     let cfg = shared.cfg();
-    let has_telegram = telegram::creds(&cfg).is_some();
+    let has_telegram = telegram::creds(&cfg).map_or(false, |c| !c.chat_id.is_empty());
     let ntfy_topic = config::get_str(&cfg, "phone.ntfy.topic")
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if ntfy_topic.is_some() && ntfy_warning(shared).is_some() && !WARNED.swap(true, Ordering::SeqCst) {
+        util::log_line(&["ntfy-warning", "topic is short or guessable and no phone.ntfy.token is set"]);
+    }
     let shared = shared.clone();
     std::thread::spawn(move || {
         if has_telegram {
@@ -155,7 +182,7 @@ fn deliver(shared: &Arc<Shared>, msg: PhoneMsg) {
                         } else if shared.tg_msgs.lock().unwrap().remove(&mid).is_some() {
                             // Closed while this message was on its way (and resolved() did not
                             // see it): close the message right away.
-                            telegram::edit(&shared, mid, &format!("{html}\n\n{}", shared.t().tg_closed));
+                            telegram::edit(&shared, mid, &telegram::with_footer(&html, shared.t().tg_closed));
                         }
                     }
                     util::log_line(&["telegram-sent", msg.kind]);
@@ -167,7 +194,8 @@ fn deliver(shared: &Arc<Shared>, msg: PhoneMsg) {
             let server = config::get_str(&cfg, "phone.ntfy.server")
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "https://ntfy.sh".to_string());
-            match ntfy_send(&server, &topic, &msg) {
+            let token = config::get_str(&cfg, "phone.ntfy.token").map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+            match ntfy_send(&server, &topic, token.as_deref(), &msg) {
                 Ok(()) => util::log_line(&["ntfy-sent", msg.kind]),
                 Err(e) => util::log_line(&["ntfy-error", &e]),
             }
@@ -201,14 +229,19 @@ pub fn resolved(shared: &Arc<Shared>, id: &str, summary: String) {
     let shared = shared.clone();
     std::thread::spawn(move || {
         for (mid, html) in mids {
-            telegram::edit(&shared, mid, &format!("{html}\n\n{summary}"));
+            telegram::edit(&shared, mid, &telegram::with_footer(&html, &summary));
         }
     });
 }
 
-/// True when any phone channel is configured (used by the tray test).
+/// True when phone delivery is on and a channel can actually deliver: a Telegram token with
+/// a paired chat, or an ntfy topic. Drives the long card hold and the focus-skip rule, so a
+/// switched-off or never-paired phone must not count.
 pub fn configured(shared: &Shared) -> bool {
     let cfg = shared.cfg();
-    telegram::creds(&cfg).is_some()
+    if !config::get_bool(&cfg, "phone.enabled", true) {
+        return false;
+    }
+    telegram::creds(&cfg).map(|c| !c.chat_id.is_empty()).unwrap_or(false)
         || config::get_str(&cfg, "phone.ntfy.topic").map(|t| !t.trim().is_empty()).unwrap_or(false)
 }

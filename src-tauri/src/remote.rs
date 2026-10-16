@@ -7,22 +7,37 @@
 //! paired chat is obeyed; only projects that already have Claude Code transcripts (or are
 //! listed in `remote.projects`) can be used and the working directory always comes from that
 //! list, never from message text; the prompt is passed on stdin, never through a shell; the
-//! permission mode is limited to modes that still ask; one run at a time with a watchdog.
-use crate::{config, events, telegram, util, Shared};
+//! permission mode is default, plan or acceptEdits (acceptEdits applies file edits without
+//! asking; auto and bypassPermissions are refused); a run gets the user's persistent
+//! environment, not that of whichever session started the overlay, and lives in a Job Object
+//! so /stop and the overlay's exit end its whole process tree; nothing runs while the overlay
+//! itself is elevated; one run at a time with a watchdog. Everything sent to the chat is
+//! masked for secrets.
+use crate::{config, events, mask, telegram, util, Shared};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::AppHandle;
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, HANDLE};
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegEnumValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ,
+    REG_SZ,
+};
 
-const ALLOWED_MODES: [&str; 4] = ["default", "acceptEdits", "plan", "auto"];
-/// Rate-limit windows that the limit-reset timers know how to label.
-const KNOWN_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
+/// Modes in which Claude still asks before running commands. auto and bypassPermissions (and
+/// dontAsk) approve on their own while nobody is at the PC.
+const ALLOWED_MODES: [&str; 3] = ["default", "plan", "acceptEdits"];
 /// Telegram allows 4096 characters; leave room for markup added around a chunk.
 const CHUNK_MAX: usize = 3300;
 
@@ -59,6 +74,54 @@ pub struct Running {
     pub status_mid: Option<i64>,
     /// The claude process has exited (its pid may be reused: never kill it again).
     pub exited: bool,
+    /// The run's Job Object (None if it could not be created: taskkill is used then).
+    pub job: Option<Arc<Job>>,
+}
+
+/// A Job Object holding one run's process tree. With KILL_ON_JOB_CLOSE every process still
+/// in it ends when the last handle closes: when the run is over, or when the overlay exits or
+/// crashes. No headless claude, or anything it started, outlives its run.
+pub struct Job(HANDLE);
+
+// The handle is only passed to Win32 calls, which may come from any thread.
+unsafe impl Send for Job {}
+unsafe impl Sync for Job {}
+
+impl Job {
+    fn for_child(child: &std::process::Child) -> Option<Job> {
+        unsafe {
+            let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if h.is_null() {
+                return None;
+            }
+            let job = Job(h);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                h,
+                JobObjectExtendedLimitInformation,
+                &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+                && AssignProcessToJobObject(h, child.as_raw_handle() as HANDLE) != 0;
+            ok.then_some(job)
+        }
+    }
+
+    /// End every process of the run, including children whose parent has already exited.
+    fn kill(&self) {
+        unsafe {
+            TerminateJobObject(self.0, 1);
+        }
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -111,6 +174,7 @@ pub enum Toggle {
 
 pub struct S {
     pub disabled: &'static str,
+    pub elevated: &'static str,
     pub pair_first: &'static str,
     pub help: &'static str,
     pub pick_project: &'static str,
@@ -163,7 +227,8 @@ pub struct S {
 
 static EN: S = S {
     disabled: "Remote sessions are off. Turn them on from the tray menu: Phone: remote sessions.",
-    pair_first: "Pair the Telegram chat first: send /start to your bot, then turn remote sessions on.",
+    elevated: "Remote sessions are refused while HeadsUp runs as Administrator. Quit it from the tray and start it again normally.",
+    pair_first: "Pair the Telegram chat first: send the pairing code (tray: Phone: show Telegram pairing code) to your bot, then turn remote sessions on.",
     help: "<b>Remote sessions</b>\n/new: start a new session in a project\n/sessions: pick a recent session; your next message goes there\n/status: what is running\n/stop: stop the running task\n/exit: clear the selected session\n/model [name]: model for remote runs (/model default = your default)\n\nAfter a run, just write to continue the same session. A question or permission card is answered with its buttons, or by replying to that card.",
     pick_project: "Which project? A new session starts there.",
     no_projects: "No known projects yet: open a project in Claude Code on the PC once.",
@@ -190,7 +255,7 @@ static EN: S = S {
     model_default: "Model for remote runs: your Claude Code default.",
     model_invalid: "Not a valid model name.",
     config_unreadable: "config.json could not be read, so it was not changed. Fix the file and try again.",
-    off_not_saved: "Remote sessions are off until the overlay restarts. config.json could not be saved, so fix it to keep them off.",
+    off_not_saved: "Remote sessions are off until HeadsUp restarts. config.json could not be saved, so fix it to keep them off.",
     reply_hint: "Write to continue this session · /new for a new one",
     status_running: "▶️ <b>{p}</b> · running for {s} s",
     status_target_new: "Next message starts a new session in <b>{p}</b>.",
@@ -215,7 +280,8 @@ static EN: S = S {
 
 static TR: S = S {
     disabled: "Uzaktan oturum kapalı. Tepsi menüsünden aç: Telefon: uzaktan oturum.",
-    pair_first: "Önce Telegram sohbetini eşleştir: botuna /start gönder, sonra uzaktan oturumu aç.",
+    elevated: "HeadsUp yönetici olarak çalışırken uzaktan oturum reddedilir. Tepsiden çık ve normal şekilde yeniden başlat.",
+    pair_first: "Önce Telegram sohbetini eşleştir: eşleştirme kodunu (tepsi: Telefon: Telegram eşleştirme kodunu göster) botuna gönder, sonra uzaktan oturumu aç.",
     help: "<b>Uzaktan oturum</b>\n/new: bir projede yeni oturum başlat\n/sessions: son oturumlardan birini seç; sonraki mesajın oraya gider\n/status: ne çalışıyor\n/stop: çalışan görevi durdur\n/exit: seçili oturumu bırak\n/model [ad]: uzaktan çalıştırma modeli (/model default = varsayılanın)\n\nBir çalıştırma bitince yazman yeterli, aynı oturum devam eder. Soru ve izin kartları kendi butonlarıyla ya da o karta yanıt vererek cevaplanır.",
     pick_project: "Hangi proje? Yeni oturum orada başlar.",
     no_projects: "Henüz bilinen proje yok: bir projeyi PC'de Claude Code ile bir kez aç.",
@@ -242,7 +308,7 @@ static TR: S = S {
     model_default: "Uzaktan çalıştırma modeli: Claude Code varsayılanın.",
     model_invalid: "Geçerli bir model adı değil.",
     config_unreadable: "config.json okunamadı, bu yüzden değiştirilmedi. Dosyayı düzeltip tekrar dene.",
-    off_not_saved: "Uzaktan oturum overlay yeniden başlayana kadar kapalı. config.json kaydedilemedi; kapalı kalması için dosyayı düzelt.",
+    off_not_saved: "Uzaktan oturum HeadsUp yeniden başlayana kadar kapalı. config.json kaydedilemedi; kapalı kalması için dosyayı düzelt.",
     reply_hint: "Devam etmek için yaz · yeni oturum: /new",
     status_running: "▶️ <b>{p}</b> · {s} sn'dir çalışıyor",
     status_target_new: "Sonraki mesaj <b>{p}</b> içinde yeni oturum başlatır.",
@@ -362,9 +428,14 @@ pub fn claude_path(cfg: &Value) -> Option<PathBuf> {
     if let Some(u) = env("USERPROFILE") {
         candidates.push(u.join(".local").join("bin").join("claude.exe"));
     }
-    if let Some(path) = std::env::var_os("PATH") {
+    // The persistent PATH first (what the run itself gets), then the one we were started with.
+    let persistent_path = persistent_env().and_then(|e| env_get(&e, "Path").map(std::ffi::OsString::from));
+    for path in [persistent_path, std::env::var_os("PATH")].into_iter().flatten() {
         for dir in std::env::split_paths(&path) {
-            candidates.push(dir.join("claude.exe"));
+            // A relative entry would resolve against the overlay's own folder.
+            if dir.is_absolute() {
+                candidates.push(dir.join("claude.exe"));
+            }
         }
     }
     if let Some(found) = candidates.into_iter().find(|p| usable_exe(p)) {
@@ -539,50 +610,164 @@ fn transcript_mtime_ms(id: &str) -> Option<i64> {
 
 // ---------------------------------------------------------------- environment
 
-/// Names of the user's and machine's persistent environment variables, read from the
-/// registry. Anything Claude-related in our own environment that is not among them was
-/// inherited from whichever Claude session happened to start the overlay, and must not leak
-/// into remote runs. A failed read is not cached.
-fn persistent_env_names() -> Option<HashSet<String>> {
-    static NAMES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-    if let Some(n) = NAMES.lock().unwrap().clone() {
-        return Some(n);
+/// The string values (REG_SZ / REG_EXPAND_SZ) of one registry key: (name, value, expandable).
+fn reg_values(root: HKEY, path: &str) -> Option<Vec<(String, String, bool)>> {
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut key: HKEY = std::ptr::null_mut();
+    if unsafe { RegOpenKeyExW(root, wide.as_ptr(), 0, KEY_READ, &mut key) } != 0 {
+        return None;
     }
-    let mut names = HashSet::new();
-    let mut ok = false;
-    for key in ["HKCU\\Environment", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment"] {
-        let Ok(o) = Command::new("reg")
-            .args(["query", key])
-            .creation_flags(util::CREATE_NO_WINDOW)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-        else {
-            continue;
+    let mut out = Vec::new();
+    let mut name = vec![0u16; 512];
+    let mut data = vec![0u8; 8192];
+    let mut index = 0u32;
+    loop {
+        let mut name_len = name.len() as u32;
+        let mut data_len = data.len() as u32;
+        let mut kind = 0u32;
+        let rc = unsafe {
+            RegEnumValueW(key, index, name.as_mut_ptr(), &mut name_len, std::ptr::null(), &mut kind, data.as_mut_ptr(), &mut data_len)
         };
-        if !o.status.success() {
+        if rc == ERROR_MORE_DATA {
+            if data.len() < 1 << 20 {
+                // Grow and read the same value again.
+                name.resize(16_384, 0);
+                data.resize((data_len as usize).max(data.len() * 2).min(1 << 20), 0);
+            } else {
+                index += 1; // an absurdly large value: skip it
+            }
             continue;
         }
-        ok = true;
-        for line in String::from_utf8_lossy(&o.stdout).lines() {
-            // "    NAME    REG_SZ    value"
-            let t = line.trim_start();
-            if line.starts_with("    ") && t.contains("    REG_") {
-                if let Some(name) = t.split("    ").next() {
-                    names.insert(name.trim().to_uppercase());
+        if rc != 0 {
+            break; // ERROR_NO_MORE_ITEMS, or a failure
+        }
+        index += 1;
+        if kind != REG_SZ && kind != REG_EXPAND_SZ {
+            continue;
+        }
+        let units: Vec<u16> = data[..(data_len as usize).min(data.len())]
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let value = String::from_utf16_lossy(&units).trim_end_matches('\0').to_string();
+        let value_name = String::from_utf16_lossy(&name[..(name_len as usize).min(name.len())]);
+        out.push((value_name, value, kind == REG_EXPAND_SZ));
+    }
+    unsafe {
+        RegCloseKey(key);
+    }
+    Some(out)
+}
+
+fn env_get<'a>(env: &'a [(String, String)], k: &str) -> Option<&'a str> {
+    env.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str())
+}
+
+fn env_set(env: &mut Vec<(String, String)>, k: &str, v: String) {
+    match env.iter().position(|(n, _)| n.eq_ignore_ascii_case(k)) {
+        Some(i) => env[i].1 = v,
+        None => env.push((k.to_string(), v)),
+    }
+}
+
+/// Expand %NAME% references from `env`; unknown ones stay as they are, as in Windows.
+fn expand(value: &str, env: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else { break };
+        match env_get(env, &after[..end]).filter(|_| end > 0) {
+            Some(v) => {
+                out.push_str(&rest[..start]);
+                out.push_str(v);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[..=start]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Variables Windows gives every process of the logon session. They are not in the
+/// registry's Environment keys, so they come from our own environment.
+const SESSION_BASE: &[&str] = &[
+    "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT", "TEMP", "TMP", "OS", "USERPROFILE", "USERNAME",
+    "USERDOMAIN", "USERDOMAIN_ROAMINGPROFILE", "LOGONSERVER", "COMPUTERNAME", "SESSIONNAME", "HOMEDRIVE", "HOMEPATH",
+    "HOMESHARE", "APPDATA", "LOCALAPPDATA", "ProgramData", "ALLUSERSPROFILE", "PUBLIC", "ProgramFiles",
+    "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432",
+    "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "NUMBER_OF_PROCESSORS",
+];
+
+/// The environment a terminal opened now would get: the session's own variables plus the
+/// persistent machine and user variables (user wins; Path is machine + user), %VAR%
+/// expanded. Not the environment we were started with: that belongs to whichever Claude
+/// session's hook started the overlay (its project's PATH, its CLAUDE_* variables).
+fn persistent_env() -> Option<Vec<(String, String)>> {
+    let machine = reg_values(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
+    let user = reg_values(HKEY_CURRENT_USER, "Environment");
+    if machine.is_none() && user.is_none() {
+        util::log_line(&["remote-error", "could not read the persistent environment"]);
+        return None;
+    }
+    let mut base: Vec<(String, String)> = Vec::new();
+    for k in SESSION_BASE {
+        if let Ok(v) = std::env::var(k) {
+            env_set(&mut base, k, v);
+        }
+    }
+    let mut env = build_env(base, machine.unwrap_or_default(), user.unwrap_or_default());
+    // Listing and running must use the same Claude directory.
+    if let Ok(v) = std::env::var("CLAUDE_CONFIG_DIR") {
+        env_set(&mut env, "CLAUDE_CONFIG_DIR", v);
+    }
+    Some(env)
+}
+
+/// Merge the registry's (name, value, expandable) lists over the session's own variables the
+/// way Windows builds a logon environment, so a %VAR% resolves whatever order the values
+/// were created in: plain values first, then expandable ones, Path (machine + user) last.
+fn build_env(
+    base: Vec<(String, String)>,
+    machine: Vec<(String, String, bool)>,
+    user: Vec<(String, String, bool)>,
+) -> Vec<(String, String)> {
+    let mut env = base;
+    let scopes = [(false, &machine), (true, &user)];
+    for pass_expandable in [false, true] {
+        for (is_user, vars) in scopes {
+            for (name, value, expandable) in vars.iter() {
+                if *expandable != pass_expandable || name.eq_ignore_ascii_case("Path") {
+                    continue;
+                }
+                if is_user || !SESSION_BASE.iter().any(|b| b.eq_ignore_ascii_case(name)) {
+                    // The session's own values win over the machine defaults (USERNAME=SYSTEM,
+                    // TEMP=C:\Windows\Temp); the user's own variables win over both.
+                    let value = if *expandable { expand(value, &env) } else { value.clone() };
+                    env_set(&mut env, name, value);
                 }
             }
         }
     }
-    if !ok {
-        util::log_line(&["remote-error", "could not read persistent environment names"]);
-        return None;
+    let mut path: Vec<String> = Vec::new();
+    for (_, vars) in scopes {
+        for (name, value, expandable) in vars.iter() {
+            if name.eq_ignore_ascii_case("Path") {
+                let value = if *expandable { expand(value, &env) } else { value.clone() };
+                path.extend(value.split(';').filter(|p| !p.trim().is_empty()).map(String::from));
+            }
+        }
     }
-    *NAMES.lock().unwrap() = Some(names.clone());
-    Some(names)
+    env_set(&mut env, "Path", path.join(";"));
+    env
 }
 
-/// Variables a parent Claude Code session injects into its children.
+/// Variables a parent Claude Code session injects into its children (removed when the
+/// persistent environment cannot be read).
 const SESSION_VARS: [&str; 6] = [
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
@@ -591,21 +776,6 @@ const SESSION_VARS: [&str; 6] = [
     "CLAUDE_AGENT_SDK_VERSION",
     "CLAUDE_CODE_SESSION_ID",
 ];
-
-fn is_session_scoped(name: &str, persistent: Option<&HashSet<String>>) -> bool {
-    let n = name.to_uppercase();
-    if n == "CLAUDE_CONFIG_DIR" {
-        // Listing and running must use the same Claude directory.
-        return false;
-    }
-    match persistent {
-        Some(p) => {
-            (n == "CLAUDECODE" || n.starts_with("CLAUDE_") || n.starts_with("ANTHROPIC_") || n.starts_with("MCP_"))
-                && !p.contains(&n)
-        }
-        None => SESSION_VARS.contains(&n.as_str()),
-    }
-}
 
 // ---------------------------------------------------------------- telegram glue
 
@@ -672,6 +842,12 @@ pub fn on_command(app: &AppHandle, shared: &Arc<Shared>, text: &str) -> bool {
         send(shared, x.disabled, &[]);
         return true;
     }
+    // An elevated overlay would hand its administrator token to every run.
+    if crate::win::is_elevated() && matches!(cmd.as_str(), "/new" | "/projects" | "/sessions") {
+        util::log_line(&["remote-refused", "elevated"]);
+        send(shared, x.elevated, &[]);
+        return true;
+    }
     let cfg = shared.cfg();
     match cmd.as_str() {
         "/help" => {
@@ -691,7 +867,7 @@ pub fn on_command(app: &AppHandle, shared: &Arc<Shared>, text: &str) -> bool {
                 let buttons: Vec<Vec<(String, String)>> = projects
                     .iter()
                     .enumerate()
-                    .map(|(i, p)| vec![(format!("📁 {}", p.name), format!("rp:{gen}:{i}"))])
+                    .map(|(i, p)| vec![(util::truncate(&mask::secrets(&format!("📁 {}", p.name)), 60), format!("rp:{gen}:{i}"))])
                     .collect();
                 send(shared, x.pick_project, &buttons);
             }
@@ -710,7 +886,7 @@ pub fn on_command(app: &AppHandle, shared: &Arc<Shared>, text: &str) -> bool {
                 let buttons: Vec<Vec<(String, String)>> = sessions
                     .iter()
                     .enumerate()
-                    .map(|(i, si)| vec![(util::truncate(&format!("{} · {}", si.project, si.title), 60), format!("rs:{gen}:{i}"))])
+                    .map(|(i, si)| vec![(util::truncate(&mask::secrets(&format!("{} · {}", si.project, si.title)), 60), format!("rs:{gen}:{i}"))])
                     .collect();
                 send(shared, x.pick_session, &buttons);
             }
@@ -965,8 +1141,9 @@ pub fn toggle(app: &AppHandle, shared: &Arc<Shared>) -> Toggle {
 
 // ---------------------------------------------------------------- running claude
 
+/// Fallback when a run has no Job Object.
 pub fn kill_tree(pid: u32) {
-    let _ = Command::new("taskkill")
+    let _ = Command::new(crate::win::system_dir().join("taskkill.exe"))
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .creation_flags(util::CREATE_NO_WINDOW)
         .stdout(Stdio::null())
@@ -981,14 +1158,16 @@ pub fn stop_running(app: &AppHandle, shared: &Arc<Shared>, quitting: bool) -> bo
         let mut st = shared.remote.lock().unwrap();
         st.running.as_mut().map(|r| {
             r.stop_requested = true;
-            (r.pid, r.exited, r.session_id.clone())
+            (r.pid, r.exited, r.session_id.clone(), r.job.clone())
         })
     };
-    let Some((pid, exited, session_id)) = info else { return false };
+    let Some((pid, exited, session_id, job)) = info else { return false };
     util::log_line(&["remote-stop", &pid.to_string()]);
-    // pid 0: not spawned yet (start_run checks stop_requested right after spawning).
-    if pid != 0 && !exited {
-        kill_tree(pid);
+    match job {
+        Some(job) => job.kill(),
+        // pid 0: not spawned yet (start_run checks stop_requested right after spawning).
+        None if pid != 0 && !exited => kill_tree(pid),
+        None => {}
     }
     if let Some(id) = &session_id {
         events::cancel_pending_for_session(app, shared, id);
@@ -1002,8 +1181,11 @@ pub fn shutdown(app: &AppHandle, shared: &Arc<Shared>) {
     stop_running(app, shared, true);
 }
 
-/// HTML-escaped chunks of `text`, each at most CHUNK_MAX characters after escaping.
+/// HTML-escaped chunks of `text`, each at most CHUNK_MAX characters after escaping. Secrets
+/// are masked over the whole text first, so none is split across chunks or lines unmasked.
 fn escaped_chunks(text: &str) -> Vec<String> {
+    let text = mask::secrets(text);
+    let esc = crate::phone::esc_raw;
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut cur_len = 0usize;
@@ -1053,14 +1235,15 @@ fn activity_line(block: &Value) -> Option<String> {
     match block.get("type").and_then(Value::as_str) {
         Some("tool_use") => {
             let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-            Some(format!("🔧 {}", util::truncate(&events::describe_tool(name, block.get("input")), 120)))
+            // Masked before cutting, so a cut never leaves part of a secret unrecognised.
+            Some(format!("🔧 {}", util::truncate(&mask::secrets(&events::describe_tool(name, block.get("input"))), 120)))
         }
         Some("text") => {
             let t = block.get("text").and_then(Value::as_str).unwrap_or("").trim();
             if t.is_empty() {
                 None
             } else {
-                Some(format!("✍️ {}", util::truncate(&t.split_whitespace().collect::<Vec<_>>().join(" "), 120)))
+                Some(format!("✍️ {}", util::truncate(&mask::secrets(&t.split_whitespace().collect::<Vec<_>>().join(" ")), 120)))
             }
         }
         _ => None,
@@ -1068,12 +1251,12 @@ fn activity_line(block: &Value) -> Option<String> {
 }
 
 /// Feed the rate-limit windows that headless runs report into the limit-reset timers
-/// (only the windows the timers know how to label).
+/// (only the windows the status line reports too).
 fn feed_rate_limits(app: &AppHandle, shared: &Arc<Shared>, v: &Value) {
     let Some(windows) = v.pointer("/rate_limit_info/unifiedWindows").and_then(Value::as_object) else { return };
     let mut rl = Map::new();
     for (name, info) in windows {
-        if !KNOWN_WINDOWS.contains(&name.as_str()) {
+        if !events::LIMIT_WINDOWS.contains(&name.as_str()) {
             continue;
         }
         let Some(at) = info.get("resetsAt").and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64))) else { continue };
@@ -1087,6 +1270,12 @@ fn feed_rate_limits(app: &AppHandle, shared: &Arc<Shared>, v: &Value) {
 
 pub fn start_run(app: &AppHandle, shared: &Arc<Shared>, target: Target, prompt: String) {
     let x = s(shared);
+    // An elevated overlay would hand its administrator token to the run.
+    if crate::win::is_elevated() {
+        util::log_line(&["remote-refused", "elevated"]);
+        send(shared, x.elevated, &[]);
+        return;
+    }
     if shared.remote.lock().unwrap().running.is_some() {
         send(shared, x.busy, &[]);
         return;
@@ -1098,7 +1287,7 @@ pub fn start_run(app: &AppHandle, shared: &Arc<Shared>, target: Target, prompt: 
     };
     // The working directory must be a known project, whatever the menus said earlier.
     if !is_known_project(&cfg, &cwd) {
-        util::log_line(&["remote-refused", &cwd]);
+        util::log_line(&["remote-refused", "unknown project", &project]);
         send(shared, x.no_projects, &[]);
         return;
     }
@@ -1106,10 +1295,15 @@ pub fn start_run(app: &AppHandle, shared: &Arc<Shared>, target: Target, prompt: 
         send(shared, x.claude_missing, &[]);
         return;
     };
-    let mut mode = config::get_str(&cfg, "remote.permissionMode").unwrap_or_else(|| "default".to_string());
-    if !ALLOWED_MODES.contains(&mode.as_str()) {
-        mode = "default".to_string();
-    }
+    let wanted = config::get_str(&cfg, "remote.permissionMode").unwrap_or_else(|| "default".to_string());
+    let mode = if ALLOWED_MODES.contains(&wanted.as_str()) {
+        wanted
+    } else {
+        util::log_line(&["remote-mode-refused", &wanted, "using default"]);
+        "default".to_string()
+    };
+    // Shown next to "working…": acceptEdits changes files without asking.
+    let mode_note = if mode == "default" { String::new() } else { format!(" · <i>{}</i>", esc(&mode)) };
     let model = config::get_str(&cfg, "remote.model")
         .map(|m| m.trim().to_string())
         .filter(|m| valid_model(m));
@@ -1123,11 +1317,16 @@ pub fn start_run(app: &AppHandle, shared: &Arc<Shared>, target: Target, prompt: 
     if let Some(id) = &resume_id {
         cmd.args(["--resume", id]);
     }
-    let persistent = persistent_env_names();
-    for (k, _) in std::env::vars_os() {
-        let k = k.to_string_lossy().to_string();
-        if is_session_scoped(&k, persistent.as_ref()) {
-            cmd.env_remove(&k);
+    match persistent_env() {
+        // What a freshly opened terminal would get, not the environment of whichever Claude
+        // session happened to start the overlay.
+        Some(env) => {
+            cmd.env_clear().envs(env);
+        }
+        None => {
+            for k in SESSION_VARS {
+                cmd.env_remove(k);
+            }
         }
     }
     cmd.env("MCP_CONNECTION_NONBLOCKING", "true")
@@ -1159,6 +1358,7 @@ pub fn start_run(app: &AppHandle, shared: &Arc<Shared>, target: Target, prompt: 
             activity: String::new(),
             status_mid: None,
             exited: false,
+            job: None,
         });
         if let Some(id) = &resume_id {
             st.session_runs.insert(id.clone(), seq);
@@ -1184,6 +1384,11 @@ pub fn start_run(app: &AppHandle, shared: &Arc<Shared>, target: Target, prompt: 
             return;
         }
     };
+    // Into its Job Object before it has the prompt, so it cannot start anything outside it.
+    let job = Job::for_child(&child).map(Arc::new);
+    if job.is_none() {
+        util::log_line(&["remote-error", "no job object for the run, stop uses taskkill"]);
+    }
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(prompt.as_bytes());
         // stdin is dropped here, which closes it so claude starts.
@@ -1197,19 +1402,23 @@ pub fn start_run(app: &AppHandle, shared: &Arc<Shared>, target: Target, prompt: 
             Some(r) if r.seq == seq => {
                 r.pid = pid;
                 r.started_ms = started;
+                r.job = job.clone();
                 r.stop_requested
             }
             _ => true,
         }
     };
     if stopped_meanwhile {
-        kill_tree(pid);
+        match &job {
+            Some(job) => job.kill(),
+            None => kill_tree(pid),
+        }
     }
     if let Some(id) = &resume_id {
         shared.remote_sessions.lock().unwrap().insert(id.clone());
     }
     util::log_line(&["remote-start", &project, resume_id.as_deref().unwrap_or("new")]);
-    let status_mid = send(shared, &fill(x.working, &[("p", &esc(&project))]), &[]);
+    let status_mid = send(shared, &format!("{}{mode_note}", fill(x.working, &[("p", &esc(&project))])), &[]);
     if let Some(r) = shared.remote.lock().unwrap().running.as_mut() {
         if r.seq == seq {
             r.status_mid = status_mid;
@@ -1242,6 +1451,7 @@ pub fn start_run(app: &AppHandle, shared: &Arc<Shared>, target: Target, prompt: 
         started,
         status_mid,
         target_gen,
+        mode_note,
         title_for_new: util::truncate(&prompt.split_whitespace().collect::<Vec<_>>().join(" "), 48),
         stderr_tail,
         out: std::sync::Mutex::new(RunOut { session_id: resume_id.clone(), ..RunOut::default() }),
@@ -1322,7 +1532,12 @@ pub fn start_run(app: &AppHandle, shared: &Arc<Shared>, target: Target, prompt: 
                         .unwrap_or(false);
                     if still {
                         let secs = (util::now_ms() - ctx.started) / 1000;
-                        let html = format!("{} ({secs} s)\n<i>{}</i>", fill(s(&shared).working, &[("p", &esc(&ctx.project))]), esc(&activity));
+                        let html = format!(
+                            "{}{} ({secs} s)\n<i>{}</i>",
+                            fill(s(&shared).working, &[("p", &esc(&ctx.project))]),
+                            ctx.mode_note,
+                            esc(&activity)
+                        );
                         telegram::edit(&shared, mid, &html);
                     }
                 }
@@ -1421,6 +1636,8 @@ struct RunCtx {
     started: i64,
     status_mid: Option<i64>,
     target_gen: u64,
+    /// " · <i>plan</i>" etc. after "working…" when the mode is not the default.
+    mode_note: String,
     title_for_new: String,
     stderr_tail: Arc<std::sync::Mutex<String>>,
     out: std::sync::Mutex<RunOut>,
@@ -1569,4 +1786,77 @@ fn finalize(app: &AppHandle, shared: &Arc<Shared>, ctx: &RunCtx) {
 
 fn is_current_session(st: &RemoteState, id: &str) -> bool {
     st.running.as_ref().and_then(|r| r.session_id.as_deref()).map(|s| s == id).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expands_like_windows() {
+        let env = vec![("SystemRoot".to_string(), r"C:\Windows".to_string())];
+        assert_eq!(expand(r"%SYSTEMROOT%\x;%NOPE%;%%;50%", &env), r"C:\Windows\x;%NOPE%;%%;50%");
+        assert_eq!(expand("%NOPE%%SystemRoot%", &env), r"%NOPE%C:\Windows");
+    }
+
+    #[test]
+    fn path_expands_variables_defined_after_it() {
+        let s = |v: &str| v.to_string();
+        let base = vec![(s("SystemRoot"), s(r"C:\Windows"))];
+        let machine = vec![
+            (s("Path"), s(r"%SystemRoot%\system32;%JAVA_HOME%\bin"), true),
+            (s("JAVA_HOME"), s(r"%TOOLS%\jdk"), true),
+            (s("TOOLS"), s(r"C:\tools"), false),
+        ];
+        let user = vec![(s("Path"), s(r"%LATER%\bin"), true), (s("LATER"), s(r"C:\later"), false)];
+        let env = build_env(base, machine, user);
+        assert_eq!(env_get(&env, "Path"), Some(r"C:\Windows\system32;C:\tools\jdk\bin;C:\later\bin"));
+        assert_eq!(env_get(&env, "JAVA_HOME"), Some(r"C:\tools\jdk"));
+    }
+
+    #[test]
+    fn persistent_env_is_a_fresh_terminal_env() {
+        let env = persistent_env().expect("registry readable");
+        let path = env_get(&env, "Path").unwrap_or("");
+        assert!(path.to_lowercase().contains("system32"), "{path}");
+        assert!(!path.contains('%'), "unexpanded: {path}");
+        assert_ne!(env_get(&env, "USERNAME").map(str::to_uppercase).as_deref(), Some("SYSTEM"));
+        assert!(env_get(&env, "SystemRoot").is_some());
+    }
+
+    #[test]
+    fn chunks_are_masked_as_a_whole() {
+        let text = format!("{}token=hunter2abc\n-----BEGIN PRIVATE KEY-----\nMIIEsecret\n-----END PRIVATE KEY-----", "x".repeat(5000));
+        let all = escaped_chunks(&text).join("");
+        assert!(!all.contains("hunter2abc") && !all.contains("MIIEsecret"), "{all}");
+        assert!(escaped_chunks(&"é<".repeat(4000)).iter().all(|c| c.chars().count() <= CHUNK_MAX));
+    }
+
+    #[test]
+    fn job_ends_the_whole_tree() {
+        // cmd starts ping as its child, and ping holds the stdout pipe too: the pipe only
+        // reaches EOF once both have ended.
+        for by_drop in [false, true] {
+            let mut child = Command::new(crate::win::system_dir().join("cmd.exe"))
+                .args(["/d", "/c", "ping -n 30 127.0.0.1"])
+                .creation_flags(util::CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let job = Job::for_child(&child).expect("job object");
+            std::thread::sleep(Duration::from_millis(500));
+            let started = std::time::Instant::now();
+            if by_drop {
+                drop(job);
+            } else {
+                job.kill();
+            }
+            let mut out = Vec::new();
+            let _ = child.stdout.take().unwrap().read_to_end(&mut out);
+            let _ = child.wait();
+            assert!(started.elapsed() < Duration::from_secs(5), "tree still running after kill (drop: {by_drop})");
+        }
+    }
 }

@@ -41,7 +41,7 @@
     "holdMs": 480000,
     "events": { "stop": true, "permission": true, "question": true, "limit": true },
     "telegram": { "token": "", "chatId": "" },
-    "ntfy": { "server": "https://ntfy.sh", "topic": "" }
+    "ntfy": { "server": "https://ntfy.sh", "topic": "", "token": "" }
   },
   "remote": {
     "enabled": false,

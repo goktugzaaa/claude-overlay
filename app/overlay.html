@@ -2,11 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Claude Overlay</title>
+<title>HeadsUp</title>
 <style>
   :root {
-    --orange: #d97757;
-    --orange-deep: #c4623f;
+    --accent: #2EC4B6;
+    --accent-deep: #23A99D;
+    --accent-ink: #062b27; /* text on the accent: white would fail contrast */
     --cream: #f4efe8;
     --ink: rgba(255, 255, 255, 0.92);
     --ink-2: rgba(255, 255, 255, 0.62);
@@ -55,11 +56,14 @@
   }
   .app-icon {
     width: 40px; height: 40px; border-radius: 11px;
-    background: linear-gradient(160deg, #e8906f, var(--orange) 55%, var(--orange-deep));
+    background: linear-gradient(180deg, #34D3C0, #14968C);
     display: grid; place-items: center;
     box-shadow: 0 2px 6px rgba(0,0,0,0.35), 0 0 0 0.5px rgba(255,255,255,0.18) inset;
   }
-  .app-icon svg { width: 26px; height: 26px; }
+  /* The mark is drawn in the app icon's own frame, so it fills the tile the same way. */
+  .app-icon svg { width: 40px; height: 40px; }
+  /* An amber dot would vanish on the amber permission tile. */
+  .banner.permission .app-icon .mk-dot { fill: #fff; }
   .texts { min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-top: 1px; }
   .title { font-weight: 650; font-size: 15px; letter-spacing: -0.01em; line-height: 18px; }
   .subtitle { font-size: 13.5px; color: var(--ink); opacity: 0.9; line-height: 17px; }
@@ -82,16 +86,29 @@
     border-radius: 24px;
   }
   .banner.interactive .texts { gap: 3px; }
+  /* The whole question stays readable: it scrolls instead of being clamped. */
   .banner.interactive .body {
     font-size: 15px; line-height: 20px; color: var(--ink); font-weight: 500;
-    -webkit-line-clamp: 4; margin-top: 4px;
+    margin-top: 4px; display: block; -webkit-line-clamp: none; white-space: pre-line; max-height: 120px; overflow-y: auto;
   }
+  .banner.interactive .body, .cmd, .list { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.22) transparent; }
+  /* Cards with buttons beyond the newest few wait, counted in the "+N" pill. */
+  .banner.queued { display: none; }
+  .more {
+    padding: 4px 12px; border-radius: 999px;
+    background: var(--glass); border: 1px solid var(--glass-border);
+    color: var(--ink-2); font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  }
+  /* Until the pointer moves over a card that has just appeared or moved, clicks are ignored. */
+  .actions, .list { transition: opacity 150ms; }
+  .banner.arming .actions, .banner.arming .list { opacity: 0.55; }
   .qhead { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); margin-top: 6px; }
   .panel { grid-column: 1 / -1; margin-top: 12px; }
   .list {
     display: flex; flex-direction: column;
     background: rgba(255,255,255,0.055); border: 1px solid rgba(255,255,255,0.09);
-    border-radius: 14px; overflow: hidden;
+    border-radius: 14px; overflow-x: hidden; overflow-y: auto; max-height: 300px;
   }
   .row {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -101,18 +118,22 @@
   }
   .row:first-child { border-top: 0; }
   .row:hover { background: rgba(255,255,255,0.10); }
-  .row:active { background: rgba(217,119,87,0.28); }
+  .row:active { background: rgba(46,196,182,0.28); }
   .row .lbl { font-size: 14px; font-weight: 600; color: var(--ink); line-height: 18px; }
   .row .desc { font-size: 12.5px; color: var(--ink-2); line-height: 16px; margin-top: 2px; }
   .row .chev { color: var(--ink-2); font-size: 15px; opacity: 0.55; flex: none; }
-  .row.sel { background: rgba(217,119,87,0.20); }
-  .row.sel .chev { color: var(--orange); opacity: 1; }
+  .row.sel { background: rgba(46,196,182,0.20); }
+  .row.sel .chev { color: var(--accent); opacity: 1; }
   .cmd {
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; line-height: 18px;
     color: var(--cream); background: rgba(0,0,0,0.38); border: 1px solid rgba(255,255,255,0.08);
     border-radius: 12px; padding: 10px 12px; white-space: pre-wrap; word-break: break-all;
-    max-height: 74px; overflow: hidden;
+    /* The full text the host sends (line breaks kept) scrolls; nothing is clipped silently. */
+    max-height: 216px; overflow: auto;
+    direction: ltr; unicode-bidi: isolate;
   }
+  /* Cut markers and made-visible hidden characters must stand out from the command. */
+  .cmd .mark { color: #ffd27a; background: rgba(240,169,59,0.18); border-radius: 4px; }
   .row.other .lbl { color: var(--ink-2); font-weight: 500; }
   .free { display: flex; gap: 8px; margin-top: 10px; }
   .free input {
@@ -120,7 +141,7 @@
     background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.14); border-radius: 12px;
     padding: 0 12px; height: 42px; outline: none;
   }
-  .free input:focus { border-color: rgba(217,119,87,0.8); box-shadow: 0 0 0 3px rgba(217,119,87,0.2); }
+  .free input:focus { border-color: rgba(46,196,182,0.8); box-shadow: 0 0 0 3px rgba(46,196,182,0.2); }
   .free .btn { width: 110px; flex: none; }
   .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
   .actions.single { grid-template-columns: 1fr; }
@@ -131,13 +152,13 @@
   }
   .btn:hover { background: rgba(255,255,255,0.14); }
   .btn:active { transform: scale(0.985); }
-  .btn.primary { background: var(--orange); border-color: transparent; color: #1b120e; }
-  .btn.primary:hover { background: #e38a6a; }
+  .btn.primary { background: var(--accent); border-color: transparent; color: var(--accent-ink); }
+  .btn.primary:hover { background: var(--accent-deep); }
   .btn.danger:hover { background: rgba(229,72,77,0.22); border-color: rgba(229,72,77,0.6); }
   .foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; min-height: 16px; font-size: 11.5px; color: var(--ink-2); }
   .foot .hint { font-weight: 600; }
   .foot .count { font-variant-numeric: tabular-nums; opacity: 0.8; }
-  .progress { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--orange); opacity: 0.7; transform-origin: left; }
+  .progress { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--accent); opacity: 0.7; transform-origin: left; }
   .banner.answered .panel:not(.foot), .banner.answered .progress, .banner.expired .panel:not(.foot), .banner.expired .progress { display: none; }
   .banner.answered .foot .hint { color: var(--green); }
   .banner.answered .foot .count, .banner.expired .foot .count { display: none; }
@@ -164,7 +185,7 @@
   .glow {
     position: absolute; inset: -30px;
     border-radius: 50%;
-    background: radial-gradient(circle, rgba(217,119,87,0.55) 0%, rgba(217,119,87,0.18) 40%, rgba(217,119,87,0) 70%);
+    background: radial-gradient(circle, rgba(46,196,182,0.55) 0%, rgba(46,196,182,0.18) 40%, rgba(46,196,182,0) 70%);
     animation: glow-pulse 1.8s ease-in-out infinite;
     filter: blur(2px);
   }
@@ -186,17 +207,21 @@
   .logo-svg {
     width: 118px; height: 118px; position: relative;
     filter: drop-shadow(0 6px 18px rgba(0,0,0,0.45));
-    animation: spin-slow 9s cubic-bezier(0.3, 0.1, 0.2, 1) forwards;
   }
-  @keyframes spin-slow { to { transform: rotate(28deg); } }
-  .ray {
-    stroke: var(--orange); stroke-linecap: round; fill: none;
-    transform-origin: 50px 50px;
-    animation: breathe 1.5s ease-in-out infinite;
+  /* The chevrons rise in a loop, the lower one a beat later; the dot pulses. */
+  .logo-svg .mk-up, .logo-svg .mk-low { animation: rise 1.5s ease-in-out infinite; }
+  .logo-svg .mk-low { animation-delay: 0.16s; }
+  @keyframes rise {
+    0%, 100% { transform: translateY(0); }
+    45%, 55% { transform: translateY(-7px); }
   }
-  @keyframes breathe {
+  .logo-svg .mk-dot {
+    transform-box: fill-box; transform-origin: center;
+    animation: dot-pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes dot-pulse {
     0%, 100% { transform: scale(1); }
-    50%      { transform: scale(1.09); }
+    50%      { transform: scale(1.18); }
   }
   .caption {
     padding: 7px 14px; border-radius: 999px;
@@ -210,13 +235,13 @@
   .caption.leaving { animation: caption-out 300ms ease-in forwards; }
   @keyframes caption-in { to { opacity: 1; transform: translateY(0); } }
   @keyframes caption-out { to { opacity: 0; transform: translateY(-8px); } }
-  .caption b { color: var(--orange); }
+  .caption b { color: var(--accent); }
 </style>
 </head>
 <body>
   <div id="stack"></div>
   <div id="logo-slot"></div>
-  <canvas id="icon-canvas" width="32" height="32" style="display:none"></canvas>
+  <canvas id="icon-canvas" width="32" height="32" hidden></canvas>
 
 <script>
   // Bridge to the host. Electron provides window.overlay through its preload script;
@@ -225,7 +250,8 @@
     const { invoke } = window.__TAURI__.core;
     const { listen } = window.__TAURI__.event;
     window.overlay = {
-      on(channel, handler) { listen(channel, (e) => handler(e.payload)); },
+      on(channel, handler) { return listen(channel, (e) => handler(e.payload)); },
+      ready() { invoke('ready'); },
       itemDone() { invoke('item_done'); },
       log(message) { invoke('rlog', { message: String(message) }); },
       sendTrayIcon() {},
@@ -236,24 +262,29 @@
     };
   }
 
-  // Claude starburst: 12 rays with slightly irregular angle, length and weight.
-  const RAYS = [
-    [  0, 1.00, 10.5 ], [ 32, 0.78, 9.5 ], [ 58, 0.92, 10 ], [ 90, 0.70, 9 ],
-    [ 118, 0.96, 10.5 ], [ 150, 0.74, 9 ], [ 180, 1.00, 10.5 ], [ 212, 0.80, 9.5 ],
-    [ 238, 0.90, 10 ], [ 270, 0.72, 9 ], [ 298, 0.95, 10.5 ], [ 330, 0.76, 9 ],
-  ];
+  // HeadsUp mark: two rising chevrons and an amber dot, in the app icon's 100x100 frame (its
+  // rounded square spans 4..96). Colours are attributes, not inline styles (CSP).
+  function markShapes(color, dot) {
+    const line = `fill="none" stroke="${color}" stroke-linecap="round" stroke-linejoin="round"`;
+    return `<polyline class="mk-up" points="23,57 46,35 69,57" ${line} stroke-width="11.7"/>`
+      + `<polyline class="mk-low" points="29,77.5 46,62.5 63,77.5" ${line} stroke-width="9.4" opacity=".6"/>`
+      + `<circle class="mk-dot" cx="75" cy="26" r="10" fill="${dot}"/>`;
+  }
 
-  function starburstSvg({ size = 100, color = '#d97757', animated = false } = {}) {
-    const cx = 50, cy = 50, inner = 9, outer = 46;
-    const rays = RAYS.map(([deg, len, w], i) => {
-      const a = (deg * Math.PI) / 180;
-      const r2 = inner + (outer - inner) * len;
-      const x1 = cx + Math.cos(a) * inner, y1 = cy + Math.sin(a) * inner;
-      const x2 = cx + Math.cos(a) * r2,    y2 = cy + Math.sin(a) * r2;
-      const delay = animated ? ` style="animation-delay:${(i * 0.09).toFixed(2)}s"` : '';
-      return `<line class="ray" x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${color}" stroke-width="${w}"${delay}/>`;
-    }).join('');
-    return `<svg viewBox="0 0 100 100" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">${rays}</svg>`;
+  function markSvg({ size = 100, color = '#fff', dot = '#FFC457' } = {}) {
+    return `<svg viewBox="0 0 100 100" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">${markShapes(color, dot)}</svg>`;
+  }
+
+  // The whole app icon: teal rounded square with a gap around the dot, white chevrons, amber
+  // dot. Ids are unique per copy, since several can be in the page at once.
+  let badgeSeq = 0;
+  function badgeSvg({ size = 100 } = {}) {
+    const id = `hu-badge-${++badgeSeq}`;
+    return `<svg viewBox="0 0 100 100" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">`
+      + `<defs><linearGradient id="${id}-g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#34D3C0"/><stop offset="1" stop-color="#14968C"/></linearGradient>`
+      + `<mask id="${id}-m"><rect width="100" height="100" fill="#fff"/><circle cx="75" cy="26" r="14" fill="#000"/></mask></defs>`
+      + `<rect x="4" y="4" width="92" height="92" rx="22" fill="url(#${id}-g)" mask="url(#${id}-m)"/>`
+      + `${markShapes('#fff', '#FFC457')}</svg>`;
   }
 
   // ------------------------------------------------------------ audio
@@ -295,25 +326,31 @@
 
   // ------------------------------------------------------------ banner
   const stack = document.getElementById('stack');
-  const MAX_BANNERS = 3;
+  const MAX_BANNERS = 3;      // plain banners on screen at once
+  const MAX_INTERACTIVE = 3;  // cards with buttons on screen at once; the rest wait behind "+N"
+  const ARM_MS = 700;         // a new card ignores clicks this long, and until the pointer moves over it
+  const REARM_MS = 350;       // the same after a card moved or changed under the pointer
 
   function bannerShell(p, extraClass) {
     const el = document.createElement('div');
     el.className = `banner ${p.kind || 'done'} ${extraClass || ''}`;
     el.innerHTML = `
-      <div class="app-icon">${starburstSvg({ size: 26, color: '#fff' })}</div>
+      <div class="app-icon">${markSvg({ size: 40 })}</div>
       <div class="texts">
         <div class="title">${escapeHtml(p.title || 'Claude')}</div>
         ${p.subtitle ? `<div class="subtitle">${escapeHtml(p.subtitle)}</div>` : ''}
         <div class="content"></div>
       </div>
       <div class="time">${escapeHtml(p.nowLabel || 'now')}</div>`;
-    stack.appendChild(el);
-    while (stack.children.length > MAX_BANNERS) {
-      const old = stack.firstElementChild;
-      if (old && !old.classList.contains('leaving') && !old.classList.contains('interactive')) dismiss(old);
-      else break;
+    if (extraClass === 'interactive') {
+      // Newest card on top, so it is always on screen; older ones move down or wait.
+      stack.prepend(el);
+      return el;
     }
+    stack.appendChild(el);
+    const plain = [...stack.children].filter((b) =>
+      b.classList.contains('banner') && !b.classList.contains('interactive') && !b.classList.contains('leaving'));
+    while (plain.length > MAX_BANNERS) dismiss(plain.shift());
     return el;
   }
 
@@ -328,15 +365,19 @@
 
   function dismiss(el) {
     if (!el || el.classList.contains('leaving')) return;
-    if (el.classList.contains('interactive')) window.overlay.log(`dismiss ${el.dataset.id}`);
+    const inter = el.classList.contains('interactive');
+    if (inter) window.overlay.log(`dismiss ${el.dataset.id}`);
     clearTimeout(el._timer);
     el.classList.add('leaving');
-    if (el.classList.contains('interactive')) reportHotRects();
-    el.addEventListener('animationend', () => {
+    const gone = () => {
       el.remove();
-      if (el.classList.contains('interactive')) reportHotRects();
+      if (inter) layoutStack();
       window.overlay.itemDone();
-    }, { once: true });
+    };
+    // A waiting card is not rendered: there is no slide-out to wait for.
+    if (el.classList.contains('queued')) { gone(); return; }
+    if (inter) reportHotRects();
+    el.addEventListener('animationend', gone, { once: true });
   }
 
   // ------------------------------------------------------- interactive
@@ -347,13 +388,103 @@
   function reportHotRects() {
     const rects = [];
     for (const el of stack.querySelectorAll('.banner.interactive')) {
-      if (el.classList.contains('leaving')) continue;
+      if (el.classList.contains('leaving') || el.classList.contains('queued')) { delete el._top; continue; }
+      // A card that moved (one above it came, went or changed size) must not take a click
+      // aimed at what was there before.
+      const top = el.offsetTop;
+      if (el._top !== undefined && Math.abs(top - el._top) > 8) disarm(el, REARM_MS);
+      el._top = top;
+      // Only the part inside the window can be clicked.
       const r = el.getBoundingClientRect();
-      rects.push({ left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+      const t = Math.max(0, r.top), b = Math.min(window.innerHeight, r.bottom);
+      if (b > t) rects.push({ left: r.left, top: t, right: r.right, bottom: b });
     }
     window.overlay.hotRects(rects);
     if (rects.length && !rectTimer) rectTimer = setInterval(reportHotRects, 250);
     if (!rects.length && rectTimer) { clearInterval(rectTimer); rectTimer = null; }
+  }
+
+  // Show the newest cards that fit in the window (at most MAX_INTERACTIVE; the newest always,
+  // and a card whose Other… field is open is never hidden). The rest wait behind "+N" and
+  // come in as cards above them are answered.
+  function layoutStack() {
+    const cards = [...stack.querySelectorAll('.banner.interactive:not(.leaving)')];
+    let more = stack.querySelector('.more');
+    if (more) more.remove(); // measured without it
+    const room = window.innerHeight - stack.offsetTop - 36; // leave space for the pill
+    let shown = 0, waiting = 0, last = null;
+    for (const el of cards) {
+      const wasQueued = el.classList.contains('queued');
+      el.classList.remove('queued');
+      const fits = shown === 0
+        || (!waiting && shown < MAX_INTERACTIVE && el.offsetTop + el.offsetHeight <= room);
+      if (fits || el.querySelector('.free')) {
+        shown += 1;
+        last = el;
+        if (wasQueued) {
+          disarm(el, ARM_MS);
+          if (el._runBar) el._runBar();
+        }
+      } else {
+        el.classList.add('queued');
+        waiting += 1;
+      }
+    }
+    if (waiting && last) {
+      if (!more) { more = document.createElement('div'); more.className = 'more'; }
+      more.textContent = `+${waiting}`;
+      last.after(more);
+    }
+    reportHotRects();
+  }
+
+  // Clicks count only once the card has settled and the pointer has moved over it, so a
+  // click aimed at the window underneath never lands on Allow.
+  function disarm(el, ms) {
+    el._armAt = performance.now() + ms;
+    el._moved = false;
+    el.classList.add('arming');
+  }
+  function armOnMove(el) {
+    el.addEventListener('pointermove', (e) => {
+      // The position must change: a card appearing under a resting pointer, or the window
+      // turning clickable, can produce a move event without any movement.
+      const moved = el._px !== undefined && (e.screenX !== el._px || e.screenY !== el._py);
+      el._px = e.screenX;
+      el._py = e.screenY;
+      if (moved && performance.now() >= el._armAt) {
+        el._moved = true;
+        el.classList.remove('arming');
+      }
+    });
+    // A touch tap has no pointermove before its click: once the delay has passed, the tap
+    // itself arms the card (pointerdown comes before click).
+    el.addEventListener('pointerdown', (e) => {
+      if (e.pointerType !== 'mouse' && performance.now() >= el._armAt) {
+        el._moved = true;
+        el.classList.remove('arming');
+      }
+    });
+    el.addEventListener('click', (e) => {
+      if (!el._moved) { e.stopPropagation(); e.preventDefault(); }
+    }, true);
+  }
+
+  // Hand keyboard focus back when this card's Other… field had it. Another card's open field
+  // keeps it: the overlay stays focusable while any field is open.
+  function releaseInput(el) {
+    const input = el.querySelector('.free input');
+    if (!input) return;
+    input.blur();
+    const others = [...stack.querySelectorAll('.free input')]
+      .some((i) => i !== input && !i.closest('.answered, .expired, .leaving'));
+    if (!others) window.overlay.focusInput(false);
+  }
+
+  // Cut markers and made-visible hidden characters from the host, highlighted.
+  function markup(s) {
+    return escapeHtml(s).replace(/⟦U\+[0-9A-F]{4,6}⟧|⏎|… \(\+\d+ more (?:chars|edits)\)/g,
+      (m) => `<span class="mark">${m}</span>`);
   }
 
   function showInteractive(p) {
@@ -361,6 +492,8 @@
     el.dataset.id = p.id;
     el._labels = p.labels;
     interactive.set(String(p.id), el);
+    disarm(el, ARM_MS);
+    armOnMove(el);
     setTimeout(reportHotRects, 50);
     setTimeout(reportHotRects, 700);
     const c = el.querySelector('.content');
@@ -374,19 +507,23 @@
     const bar = document.createElement('div');
     bar.className = 'progress';
     el.appendChild(bar);
-    requestAnimationFrame(() => {
-      bar.style.transition = `transform ${p.waitMs}ms linear`;
-      bar.style.transform = 'scaleX(0)';
-    });
     const count = foot.querySelector('.count');
     let deadline = Date.now() + p.waitMs;
+    let span = p.waitMs;
+    // The bar shows the time left; it is rerun when a waiting card comes into view.
+    el._runBar = () => {
+      const left = Math.max(0, deadline - Date.now());
+      bar.style.transition = 'none';
+      bar.style.transform = `scaleX(${span > 0 ? left / span : 0})`;
+      void bar.offsetWidth;
+      bar.style.transition = `transform ${left}ms linear`;
+      bar.style.transform = 'scaleX(0)';
+    };
+    requestAnimationFrame(el._runBar);
     const restartCountdown = (ms) => {
       deadline = Date.now() + ms;
-      bar.style.transition = 'none';
-      bar.style.transform = 'scaleX(1)';
-      void bar.offsetWidth;
-      bar.style.transition = `transform ${ms}ms linear`;
-      bar.style.transform = 'scaleX(0)';
+      span = ms;
+      el._runBar();
       clearTimeout(el._tick);
       tick();
     };
@@ -401,13 +538,14 @@
 
     if (p.kind === 'permission') {
       c.remove();
-      panel.innerHTML = `<div class="cmd">${escapeHtml(p.body || '')}</div>
+      panel.innerHTML = `<div class="cmd">${markup(p.body || '')}</div>
         <div class="actions">
           <button class="btn danger">${escapeHtml(p.labels.deny)}</button>
           <button class="btn primary">${escapeHtml(p.labels.allow)}</button>
         </div>`;
       panel.querySelector('.danger').addEventListener('click', () => answer(p, el, { behavior: 'deny' }));
       panel.querySelector('.primary').addEventListener('click', () => answer(p, el, { behavior: 'allow' }));
+      layoutStack();
       return;
     }
 
@@ -455,7 +593,7 @@
         const submit = () => {
           const v = input.value.trim();
           if (!v) return;
-          window.overlay.focusInput(false);
+          releaseInput(el);
           if (q.multiSelect) { selected.add(v); answers[q.key || q.question] = [...selected].join(', '); }
           else { answers[q.key || q.question] = v; }
           next();
@@ -463,14 +601,14 @@
         box.querySelector('.btn').addEventListener('click', submit);
         input.addEventListener('keydown', (e) => {
           if (e.key === 'Enter') { e.preventDefault(); submit(); }
-          else if (e.key === 'Escape') { e.preventDefault(); window.overlay.focusInput(false); box.remove(); }
+          else if (e.key === 'Escape') { e.preventDefault(); releaseInput(el); box.remove(); layoutStack(); }
         });
         const extra = 180000;
         window.overlay.extendWait(p.id, extra);
         restartCountdown(extra);
         window.overlay.focusInput(true);
         setTimeout(() => input.focus(), 60);
-        setTimeout(reportHotRects, 80);
+        setTimeout(layoutStack, 80);
       });
       list.appendChild(otherRow);
       if (q.multiSelect) {
@@ -486,21 +624,32 @@
       }
     };
     const next = () => {
+      // Leaving this question (option, OK or Send) destroys its Other… field: hand the
+      // keyboard back first, while the field still exists.
+      releaseInput(el);
       idx += 1;
-      if (idx < p.questions.length) renderQ();
-      else answer(p, el, { answers });
+      if (idx < p.questions.length) {
+        renderQ();
+        // The next question's options now sit where the last click landed.
+        disarm(el, REARM_MS);
+        layoutStack();
+      } else {
+        answer(p, el, { answers });
+      }
     };
     renderQ();
+    layoutStack();
   }
 
   function answer(p, el, data) {
     if (el.classList.contains('answered')) return;
+    releaseInput(el);
     el.classList.add('answered');
     clearTimeout(el._tick);
-    window.overlay.focusInput(false);
     const hint = el.querySelector('.hint');
     if (hint) hint.textContent = `✓ ${p.labels.answered}`;
     window.overlay.answer(p.id, data);
+    layoutStack();
   }
 
   function resolveInteractive({ id, answered }) {
@@ -508,13 +657,16 @@
     window.overlay.log(`resolve ${id} answered=${answered} found=${!!el}`);
     if (!el) return;
     interactive.delete(String(id));
+    // Answered here, on the phone or in the terminal: an open Other… field must not keep
+    // the keyboard (or the overlay focusable).
+    releaseInput(el);
     if (!answered) {
       el.classList.add('expired');
       clearTimeout(el._tick);
-      window.overlay.focusInput(false);
       const hint = el.querySelector('.hint');
       if (hint) hint.textContent = (el._labels && el._labels.answerInApp) || '';
     }
+    layoutStack();
     setTimeout(() => dismiss(el), answered ? 900 : 2500);
   }
 
@@ -535,7 +687,7 @@
     card.innerHTML = `
       <div class="glow"></div>
       <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
-      <div class="logo-svg">${starburstSvg({ size: 118, animated: true })}</div>`;
+      <div class="logo-svg">${badgeSvg({ size: 118 })}</div>`;
     const cap = document.createElement('div');
     cap.className = 'caption';
     cap.innerHTML = `<b>✦</b>&nbsp; ${escapeHtml(p.caption || 'Limit reset')}`;
@@ -567,7 +719,7 @@
     const c = document.getElementById('icon-canvas');
     const g = c.getContext('2d');
     const img = new Image();
-    const svg = starburstSvg({ size: 32, color: '#d97757' });
+    const svg = badgeSvg({ size: 32 });
     img.onload = () => {
       g.clearRect(0, 0, 32, 32);
       g.drawImage(img, 0, 0, 32, 32);
@@ -577,11 +729,13 @@
   }
 
   window.onerror = (m, src, line, col) => { try { window.overlay.log(`error ${m} @${line}:${col}`); } catch {} };
-  window.overlay.on('notify', showBanner);
-  window.overlay.on('interactive', showInteractive);
-  window.overlay.on('resolve', resolveInteractive);
-  window.overlay.on('logo', showLogo);
-  window.overlay.on('config', () => {});
+  // The host holds events back until every listener is registered (see `ready`).
+  Promise.all([
+    window.overlay.on('notify', showBanner),
+    window.overlay.on('interactive', showInteractive),
+    window.overlay.on('resolve', resolveInteractive),
+    window.overlay.on('logo', showLogo),
+  ]).finally(() => { if (window.overlay.ready) window.overlay.ready(); });
   buildTrayIcon();
 </script>
 </body>

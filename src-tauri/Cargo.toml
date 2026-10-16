@@ -1,13 +1,13 @@
 [package]
-name = "claude-overlay"
-version = "2.3.5"
+name = "headsup"
+version = "3.0.0"
 edition = "2021"
 description = "Always-on-top notifications for the Claude desktop app and Claude Code on Windows"
 license = "MIT"
-repository = "https://github.com/goktugzaaa/claude-overlay"
+repository = "https://github.com/goktugzaaa/headsup"
 
 [[bin]]
-name = "ClaudeOverlay"
+name = "HeadsUp"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -20,8 +20,11 @@ serde_json = "1"
 tiny_http = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sys-locale = "0.3"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Registry"] }
 ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+# Local endpoint auth: HMAC-SHA256 (built on sha2) with a per-install key from the OS CSPRNG.
+sha2 = "0.10"
+getrandom = "0.2"
 
 [profile.release]
 opt-level = "s"

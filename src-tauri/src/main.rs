@@ -1,17 +1,17 @@
-// Claude Overlay — always-on-top, click-through notification layer for the Claude desktop
+// HeadsUp — always-on-top, click-through notification layer for the Claude desktop
 // app (Chat, Cowork, Code) and Claude Code CLI. Tauri 2 / WebView2 edition.
 //
 // Signals:
 //   1. Windows notification center (UserNotificationListener via a PowerShell bridge):
 //      every toast the Claude app emits is mirrored as an overlay banner.
-//   2. Claude Code hooks (hooks/claude-overlay-send.ps1): Stop, PermissionRequest and
+//   2. Claude Code hooks (hooks/headsup-send.ps1): Stop, PermissionRequest and
 //      AskUserQuestion (both answerable from the banner), Notification.
 //   3. Claude Code status line (rate_limits): limit-reset timers.
 //
 //   4. Remote sessions (remote.rs): the paired Telegram chat can start or continue Claude
 //      Code sessions; the overlay runs `claude -p` headless and relays the result.
 //
-// CLI: ClaudeOverlay.exe [--install | --uninstall | --send <type>]
+// CLI: HeadsUp.exe [--install | --uninstall | --send <type>] [--from-hook]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
@@ -20,6 +20,7 @@ mod hooks;
 mod http;
 mod i18n;
 mod installer;
+mod mask;
 mod phone;
 mod remote;
 mod telegram;
@@ -36,7 +37,8 @@ use tauri::{AppHandle, Manager, State};
 
 /// A question / permission request whose hook is waiting for a click on the overlay.
 pub struct Pending {
-    pub req: tiny_http::Request,
+    /// The hook's request (signed reply; `req.pid` is the hook process, watched for exit).
+    pub req: http::HookReq,
     pub kind: String,
     pub event: Value,
     /// Unix ms; the hook gets an empty reply when this passes. Typing an answer extends it.
@@ -101,6 +103,9 @@ pub struct Shared {
     pub remote: Mutex<remote::RemoteState>,
     /// Session ids of remote runs: their cards go to the phone at once, their Stop is not relayed.
     pub remote_sessions: Mutex<HashSet<String>>,
+    /// The page has registered its event listeners; until then events wait in `early_emits`.
+    pub page_ready: AtomicBool,
+    pub early_emits: Mutex<Vec<(String, Value)>>,
 }
 
 impl Shared {
@@ -121,6 +126,12 @@ impl Shared {
         // Language or remote switch may have changed: refresh the bot's command menu.
         self.remote.lock().unwrap().commands_registered = false;
     }
+}
+
+/// The page has registered its event listeners: deliver what arrived before.
+#[tauri::command]
+fn ready(app: AppHandle, shared: State<'_, Arc<Shared>>) {
+    events::page_ready(&app, &shared);
 }
 
 #[tauri::command]
@@ -173,47 +184,157 @@ fn focus_input(active: bool, app: AppHandle, shared: State<'_, Arc<Shared>>) {
     }
 }
 
-#[tauri::command]
-fn codex_toggle(app: AppHandle, shared: State<'_, Arc<Shared>>) -> bool {
-    let t = shared.t();
-    let enabled = if installer::codex_installed() {
-        installer::uninstall_codex();
-        events::notify(&app, &shared, "Claude Overlay", t.codex_disabled, "", "info", None);
-        false
-    } else {
-        match installer::install_codex() {
-            Ok(_) => {
-                events::notify(&app, &shared, "Claude Overlay", t.codex_enabled, t.codex_enabled_body, "done", None);
-                true
-            }
-            Err(e) => {
-                events::notify(&app, &shared, "Claude Overlay", t.error, &e, "permission", None);
-                false
-            }
+/// Our app (HeadsUp, or Claude Overlay 2.x) answers the unauthenticated health check on the port.
+fn overlay_answers(port: u16) -> bool {
+    http::health(port, 1500)
+        .and_then(|b| serde_json::from_str::<Value>(&b).ok())
+        .map_or(false, |h| h.get("engine").and_then(Value::as_str) == Some("tauri"))
+}
+
+/// A copy answers on the port but not as this install (an older version that does not
+/// sign, or one using another key).
+fn older_overlay_running(port: u16) -> bool {
+    overlay_answers(port) && http::post(port, "reload-config", "{}", 1500).is_err()
+}
+
+/// The port from the environment override, else from `cfg`, else the default.
+fn configured_port(cfg: &Value) -> u16 {
+    util::env_setting("PORT")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(config::get_u64(cfg, "port", 47821) as u16)
+}
+
+/// First start after an upgrade from Claude Overlay 2.x: move its data folder (settings,
+/// Telegram pairing, key) to the new one. Not while that version still runs: its hooks would
+/// lose their scripts and config mid-session, so it is asked to quit first. false: stop here.
+fn migrate_from_2x(from_hook: bool) -> bool {
+    let no_install = util::env_setting("NO_INSTALL").is_some();
+    if !util::legacy_data_pending() {
+        // An earlier folder stays behind (its settings were copied) or the old exe recreated
+        // it: keep the hooks of sessions opened before the upgrade from starting that exe.
+        if !no_install {
+            util::disarm_legacy_data();
+        }
+        return true;
+    }
+    let notice = |text: &str| {
+        if !from_hook {
+            win::message_box("HeadsUp", text);
         }
     };
-    tray::rebuild_menu(&app, &shared);
-    enabled
+    if no_install {
+        // A test run must neither take the data away from the installed 2.x nor create the
+        // new folder (which would keep the real upgrade from moving the old one).
+        notice("HEADSUP_NO_INSTALL (or CLAUDE_OVERLAY_NO_INSTALL) is set, but the data of Claude Overlay 2.x has not been copied to %USERPROFILE%\\.headsup yet, so this test run stops here.\n\nStart HeadsUp once without it to upgrade.");
+        return false;
+    }
+    // 2.x's hooks (still loaded in open Claude Code sessions) start the old exe whenever the
+    // port does not answer, unless their spawn stamp is under 10 s old. It is kept fresh from
+    // here until the port is ours (bound right after this returns).
+    if util::hold_legacy_spawns() {
+        // A hook started 2.x a moment ago: let it come up, so it is seen (and asked to quit)
+        // below instead of taking the port after the move.
+        std::thread::sleep(std::time::Duration::from_millis(3000));
+        util::hold_legacy_spawns();
+    }
+    // Only the health check and an unsigned quit: a signed request would create a new key,
+    // and with it the new folder, before the old one is moved. 2.x listens on the port from
+    // its own config.
+    let old_cfg = util::legacy_data_source()
+        .and_then(|d| util::read_json(&d.join("config.json")))
+        .unwrap_or(Value::Null);
+    let old_port = config::get_u64(&old_cfg, "port", 47821) as u16;
+    let port = configured_port(&old_cfg);
+    let ports: Vec<u16> = if port == old_port { vec![port] } else { vec![old_port, port] };
+    let running = || ports.iter().any(|&p| overlay_answers(p));
+    if running() {
+        for &p in &ports {
+            http::quit_unsigned(p);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            util::hold_legacy_spawns();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if !running() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                notice("Claude Overlay (the previous version), or a copy of HeadsUp from another Windows account, is still running and did not quit when asked.\n\nQuit it from its tray icon, then start HeadsUp again. Claude Code sessions that are still open start the old version again through their hooks: if it keeps coming back, close them first. Your settings and Telegram pairing move over on that start.");
+                return false;
+            }
+        }
+        // It stopped answering: give it a moment to finish exiting.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    util::hold_legacy_spawns();
+    if let Err(e) = util::migrate_legacy_data() {
+        notice(&format!(
+            "The settings of Claude Overlay (the previous version) could not be copied to %USERPROFILE%\\.headsup: {e}.\n\nNothing was changed. Close any program that has its config.json open, then start HeadsUp again."
+        ));
+        return false;
+    }
+    util::retire_legacy_exe(&old_cfg);
+    util::hold_legacy_spawns();
+    true
+}
+
+fn clear_markers() {
+    let _ = std::fs::remove_file(util::marker_path(util::MARKER_STOPPED));
+    let _ = std::fs::remove_file(util::marker_path(util::MARKER_UNINSTALLED));
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A hook starts the overlay from the project folder: never keep that folder open (it
+    // could not be deleted or renamed while the overlay runs).
+    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf)) {
+        let _ = std::env::set_current_dir(dir);
+    }
+    // Started by a hook: not after the user quit from the tray or removed the hooks.
+    let from_hook = args.iter().any(|a| a == "--from-hook");
+    // Before anything reads config, state, the key or a marker.
+    if !migrate_from_2x(from_hook) {
+        return;
+    }
+    // A panic (e.g. inside Tauri's setup, when WebView2 is missing) aborts the process
+    // (panic = "abort") and release builds have no console: log it, and tell the user, or for
+    // a hook start leave the marker that stops hooks from retrying for a while.
+    std::panic::set_hook(Box::new(move |info| {
+        util::log_line(&["fatal", &info.to_string()]);
+        if from_hook {
+            let _ = std::fs::write(std::env::temp_dir().join("headsup-spawn.failed"), "");
+        } else {
+            win::message_box("HeadsUp stopped because of an error", &info.to_string());
+        }
+    }));
+    if from_hook
+        && (util::marker_path(util::MARKER_UNINSTALLED).exists() || util::marker_path(util::MARKER_STOPPED).exists())
+    {
+        return;
+    }
     config::ensure_user_data();
-    hooks::write_scripts();
     let cfg = config::load();
-    let port: u16 = std::env::var("CLAUDE_OVERLAY_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(config::get_u64(&cfg, "port", 47821) as u16);
+    let port = configured_port(&cfg);
 
+    let installing = args.iter().any(|a| a == "--install" || a == "--install-codex");
+    if installing && older_overlay_running(port) {
+        // Our scripts only accept signed replies, which that copy cannot give: installing now
+        // would break every card answer until it is quit.
+        win::message_box(
+            "HeadsUp",
+            "Another copy of HeadsUp or Claude Overlay (an older version, or one from another Windows account) is running. Nothing was installed.\n\nQuit it from its tray icon, then run this command again.",
+        );
+        return;
+    }
     if args.iter().any(|a| a == "--install") {
+        clear_markers();
         let text = match installer::install() {
             Ok(lines) => lines.join("\n"),
             Err(e) => format!("Error: {e}"),
         };
         let _ = http::post(port, "reload-config", "{}", 1500);
         let _ = http::post(port, "test-notify", "{}", 1500);
-        win::message_box("Claude Overlay installed", &text);
+        win::message_box("HeadsUp installed", &text);
         return;
     }
     if args.iter().any(|a| a == "--install-codex") {
@@ -228,26 +349,55 @@ fn main() {
     if args.iter().any(|a| a == "--uninstall") {
         let lines = installer::uninstall();
         let _ = http::post(port, "quit", "{}", 1500);
-        win::message_box("Claude Overlay removed", &lines.join("\n"));
+        win::message_box("HeadsUp removed", &lines.join("\n"));
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--send") {
         let kind = args.get(i + 1).cloned().unwrap_or_else(|| "test-notify".to_string());
-        if let Err(e) = http::post(port, &kind, "{}", 2500) {
-            win::message_box("Overlay did not respond", &e);
+        // A card holds the request until it is answered or expires.
+        let interactive = matches!(kind.as_str(), "test-question" | "test-permission" | "question" | "permission");
+        let timeout_ms = if interactive { 900_000 } else { 2500 };
+        if let Err(e) = http::post(port, &kind, "{}", timeout_ms) {
+            win::message_box("HeadsUp did not respond", &e);
         }
         return;
     }
 
+    if !from_hook {
+        // Started by hand or at logon: the user wants it running (and hooked up) again.
+        clear_markers();
+    }
+
     // Binding the port doubles as the single-instance lock: a second copy just pings the
-    // running one and exits.
+    // running one and exits (a copy started by a hook exits quietly).
     let server = match tiny_http::Server::http(("127.0.0.1", port)) {
         Ok(s) => s,
-        Err(_) => {
-            let _ = http::post(port, "test-notify", "{}", 1500);
+        Err(e) => {
+            if from_hook || http::post(port, "test-notify", "{}", 1500).is_ok() {
+                return;
+            }
+            // Something else holds the port: say so instead of exiting silently.
+            let text = if overlay_answers(port) {
+                format!(
+                    "Another copy of HeadsUp or Claude Overlay (an older version, or one from another Windows account) is already running on port {port}.\n\nQuit it from its tray icon, then start this one again."
+                )
+            } else {
+                format!(
+                    "Port {port} on 127.0.0.1 is in use by another program ({e}).\n\nSet \"port\" in %USERPROFILE%\\.headsup\\config.json to a free port."
+                )
+            };
+            util::log_line(&["startup-error", &format!("port {port}: {e}")]);
+            win::message_box("HeadsUp could not start", &text);
             return;
         }
     };
+    // Scripts and key are written only by the copy that owns the port, so the hooks on disk
+    // always match the overlay that answers them.
+    hooks::write_scripts();
+    let _ = util::secret();
+    if win::is_elevated() {
+        util::log_line(&["startup", "elevated"]);
+    }
 
     let (code, strings) = i18n::pick(config::get_str(&cfg, "language").as_deref(), &util::locale());
     let shared = Arc::new(Shared {
@@ -282,12 +432,14 @@ fn main() {
         phone_generation: AtomicU64::new(0),
         remote: Mutex::new(remote::RemoteState::new()),
         remote_sessions: Mutex::new(HashSet::new()),
+        page_ready: AtomicBool::new(false),
+        early_emits: Mutex::new(Vec::new()),
     });
 
     let setup_shared = shared.clone();
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .manage(shared)
-        .invoke_handler(tauri::generate_handler![item_done, rlog, hot_rects, answer, extend_wait, focus_input, codex_toggle])
+        .invoke_handler(tauri::generate_handler![ready, item_done, rlog, hot_rects, answer, extend_wait, focus_input])
         .setup(move |app| {
             let handle = app.handle().clone();
             let window = handle.get_webview_window("main").ok_or("main window missing")?;
@@ -307,6 +459,14 @@ fn main() {
                 });
             }
             http::serve(server, handle.clone(), setup_shared.clone());
+            {
+                // Should the page never report ready, stop holding events back after a while.
+                let (app, shared) = (handle.clone(), setup_shared.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    events::page_ready(&app, &shared);
+                });
+            }
             tray::build(&handle, &setup_shared)?;
             events::start_limit_timer(handle.clone(), setup_shared.clone());
             events::start_toast_listener(handle.clone(), setup_shared.clone());
@@ -315,6 +475,10 @@ fn main() {
             events::first_run(handle, setup_shared);
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Claude Overlay");
+        .run(tauri::generate_context!());
+    if let Err(e) = result {
+        // Release builds have no console: a failed start must not be silent.
+        util::log_line(&["fatal", &e.to_string()]);
+        win::message_box("HeadsUp could not start", &e.to_string());
+    }
 }
