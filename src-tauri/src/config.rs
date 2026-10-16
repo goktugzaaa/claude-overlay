@@ -70,3 +70,41 @@ pub fn get_str_list(v: &Value, path: &str) -> Vec<String> {
         .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
         .unwrap_or_default()
 }
+
+/// logo.style: "headsup" (the HeadsUp mark everywhere, teal accent) or "claude" (Claude's logo
+/// on banners from Claude, orange accent). Anything else is the default, "headsup".
+pub fn logo_style(v: &Value) -> &'static str {
+    match get_str(v, "logo.style").as_deref().map(str::trim) {
+        Some(s) if s.eq_ignore_ascii_case("claude") => "claude",
+        _ => "headsup",
+    }
+}
+
+/// logo.dismiss: how the limit-reset logo goes away. "anyClick" (a click anywhere on the
+/// screen, the default), "logoClick" (a click on the logo) or "auto" (after logo.durationMs).
+pub fn logo_dismiss(v: &Value) -> &'static str {
+    match get_str(v, "logo.dismiss").as_deref().map(str::trim) {
+        Some(s) if s.eq_ignore_ascii_case("logoClick") => "logoClick",
+        Some(s) if s.eq_ignore_ascii_case("auto") => "auto",
+        _ => "anyClick",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logo_keys_default_and_parse() {
+        let d = defaults();
+        assert_eq!(logo_style(&d), "headsup");
+        assert_eq!(logo_dismiss(&d), "anyClick");
+        assert_eq!(get_u64(&d, "logo.durationMs", 0), 9000);
+        let c = |style: Value, dismiss: Value| json!({"logo": {"style": style, "dismiss": dismiss}});
+        assert_eq!(logo_style(&c(json!("HeadsUp"), json!("auto"))), "headsup");
+        assert_eq!(logo_dismiss(&c(json!("HeadsUp"), json!("auto"))), "auto");
+        assert_eq!(logo_dismiss(&c(json!("x"), json!("logoclick"))), "logoClick");
+        assert_eq!(logo_style(&c(json!("x"), json!(3))), "headsup");
+        assert_eq!(logo_dismiss(&c(json!(null), json!("never"))), "anyClick");
+    }
+}

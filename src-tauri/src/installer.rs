@@ -246,6 +246,7 @@ fn install_with(explicit: bool) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     let exe = current_exe();
 
+    let lock = util::lock_config();
     let mut cfg = match util::read_json(&util::config_path()) {
         Some(v) if v.is_object() => v,
         _ if util::config_path().exists() => {
@@ -254,6 +255,8 @@ fn install_with(explicit: bool) -> Result<Vec<String>, String> {
         _ => json!({}),
     };
     let first_install = cfg.get("installedVersion").is_none();
+    // Switched off in the settings window: no install brings the shortcut back.
+    let startup_off = cfg.get("startupDisabled").and_then(Value::as_bool) == Some(true);
 
     let settings_file = settings_path();
     let _ = std::fs::create_dir_all(claude_dir());
@@ -359,6 +362,7 @@ fn install_with(explicit: bool) -> Result<Vec<String>, String> {
     cfg["installedAt"] = json!(util::now_iso());
     cfg["installedVersion"] = json!(INSTALL_VERSION);
     util::write_json(&util::config_path(), &cfg).map_err(|e| format!("config.json: {e}"))?;
+    drop(lock);
     // Hooks are in place again: hooks may start the overlay.
     let _ = std::fs::remove_file(util::marker_path(util::MARKER_UNINSTALLED));
     if let Some(line) = repoint_codex() {
@@ -374,7 +378,7 @@ fn install_with(explicit: bool) -> Result<Vec<String>, String> {
     if let Some(old) = &legacy_shortcut {
         let _ = std::fs::remove_file(old);
     }
-    if explicit || first_install || shortcut_exists {
+    if shortcut_exists || ((explicit || first_install) && !startup_off) {
         let created = create_shortcut(&exe);
         if created {
             lines.push("Added to Windows startup.".to_string());
@@ -383,7 +387,7 @@ fn install_with(explicit: bool) -> Result<Vec<String>, String> {
         }
         let keep = !created && (wanted || legacy_shortcut.is_some());
         if keep != wanted {
-            set_startup_wanted(keep);
+            set_flags(&[("startupWanted", keep)]);
         }
     } else {
         lines.push("Startup shortcut not restored (it was removed).".to_string());
@@ -396,23 +400,47 @@ fn startup_wanted() -> bool {
     util::read_json(&util::config_path()).and_then(|c| c.get("startupWanted")?.as_bool()) == Some(true)
 }
 
-/// Read fresh: install_codex may have changed config.json since the install read it.
-fn set_startup_wanted(on: bool) {
+/// Set (true) or remove (false) top-level flags of config.json. Read fresh: install_codex may
+/// have changed config.json since the install read it.
+fn set_flags(flags: &[(&str, bool)]) {
+    let _lock = util::lock_config();
     let Some(mut cfg) = util::read_json(&util::config_path()).filter(Value::is_object) else {
         return;
     };
-    match cfg.as_object_mut() {
-        Some(o) if on => {
-            o.insert("startupWanted".to_string(), json!(true));
-        }
-        Some(o) => {
-            o.remove("startupWanted");
-        }
-        None => return,
+    let Some(o) = cfg.as_object_mut() else { return };
+    let mut changed = false;
+    for &(key, on) in flags {
+        changed |= if on { o.insert(key.to_string(), json!(true)) != Some(json!(true)) } else { o.remove(key).is_some() };
+    }
+    if !changed {
+        return;
     }
     if let Err(e) = util::write_json(&util::config_path(), &cfg) {
         util::log_line(&["install-warn", &format!("config.json: {e}")]);
     }
+}
+
+/// "Start with Windows" (settings window): our Startup shortcut is there.
+pub fn startup_enabled() -> bool {
+    shortcut_path().is_some_and(|p| p.exists())
+}
+
+/// Settings window: add or remove the Startup shortcut (Claude Overlay 2.x's goes too when it
+/// is switched off). Either way the user has decided: no shortcut is owed any more, and one
+/// switched off stays off through Reinstall hooks and `--install` (startupDisabled).
+pub fn set_startup(on: bool, t: &crate::i18n::Strings) -> Result<(), String> {
+    if on {
+        if !startup_enabled() && !create_shortcut(&current_exe()) {
+            return Err(t.startup_create_failed.to_string());
+        }
+    } else {
+        for lnk in [shortcut_path(), legacy_shortcut_path()].into_iter().flatten().filter(|p| p.exists()) {
+            std::fs::remove_file(&lnk).map_err(|e| format!("{} ({e})", t.startup_remove_failed))?;
+        }
+    }
+    set_flags(&[("startupWanted", false), ("startupDisabled", !on)]);
+    util::log_line(&["startup", if on { "on" } else { "off" }]);
+    Ok(())
 }
 
 /// Self-heal at start: a Startup shortcut still owed (startupWanted) is created now.
@@ -421,7 +449,7 @@ pub fn retry_startup_shortcut() {
         return;
     }
     if shortcut_path().map_or(false, |p| p.exists()) || create_shortcut(&current_exe()) {
-        set_startup_wanted(false);
+        set_flags(&[("startupWanted", false)]);
         util::log_line(&["install-repair", "startup shortcut created"]);
     }
 }
@@ -464,6 +492,7 @@ pub fn uninstall() -> Vec<String> {
     if codex_installed() {
         lines.push(uninstall_codex());
     }
+    let _lock = util::lock_config();
     let mut cfg = match util::read_json(&util::config_path()) {
         Some(v) if v.is_object() => v,
         _ if util::config_path().exists() => {
@@ -862,6 +891,7 @@ pub fn install_codex() -> Result<String, String> {
     let (bom, text) = read_codex_config(&path)?.unwrap_or((false, String::new()));
     let stmts = codex_notify_stmts(&text)
         .map_err(|e| format!("{} could not be parsed ({e}), so it was not changed", path.display()))?;
+    let lock = util::lock_config();
     let mut cfg = match util::read_json(&util::config_path()) {
         Some(v) if v.is_object() => v,
         _ if util::config_path().exists() => {
@@ -893,6 +923,7 @@ pub fn install_codex() -> Result<String, String> {
     }
     // Saved before config.toml changes, so the original is never lost.
     util::write_json(&util::config_path(), &cfg).map_err(|e| format!("config.json: {e}"))?;
+    drop(lock);
 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -970,6 +1001,7 @@ pub fn uninstall_codex() -> String {
     if ours.is_empty() {
         return "Codex notify was not set by HeadsUp.".to_string();
     }
+    let lock = util::lock_config();
     let mut cfg = match util::read_json(&util::config_path()) {
         Some(v) if v.is_object() => v,
         _ if util::config_path().exists() => {
@@ -992,6 +1024,7 @@ pub fn uninstall_codex() -> String {
         o.remove("originalCodexNotifyArgs");
     }
     let _ = util::write_json(&util::config_path(), &cfg);
+    drop(lock);
     match (restore.is_some(), stored.is_some()) {
         (true, _) => "Codex notify removed; your earlier notify is back.".to_string(),
         (false, true) => match codex_backups(&path).into_iter().find(|b| b.exists()) {

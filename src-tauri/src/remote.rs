@@ -1081,6 +1081,7 @@ pub fn on_text(app: &AppHandle, shared: &Arc<Shared>, text: &str) -> bool {
 /// file that exists but does not parse, so a typo never wipes the user's settings.
 fn set_user_config(shared: &Shared, key: &str, value: Value) -> bool {
     let path = util::config_path();
+    let lock = util::lock_config();
     let mut cfg = if path.exists() {
         match util::read_json(&path) {
             Some(v) if v.is_object() => v,
@@ -1099,6 +1100,7 @@ fn set_user_config(shared: &Shared, key: &str, value: Value) -> bool {
     if util::write_json(&path, &cfg).is_err() {
         return false;
     }
+    drop(lock);
     shared.reload_config();
     true
 }

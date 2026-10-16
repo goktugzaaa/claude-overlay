@@ -11,6 +11,9 @@
 //   4. Remote sessions (remote.rs): the paired Telegram chat can start or continue Claude
 //      Code sessions; the overlay runs `claude -p` headless and relays the result.
 //
+// Two windows: the overlay ("main", app/overlay.html) and, on demand, the settings window
+// ("settings", app/settings.html, settings.rs). Each page's commands check which window calls.
+//
 // CLI: HeadsUp.exe [--install | --uninstall | --send <type>] [--from-hook]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -23,6 +26,7 @@ mod installer;
 mod mask;
 mod phone;
 mod remote;
+mod settings;
 mod telegram;
 mod tray;
 mod util;
@@ -106,6 +110,10 @@ pub struct Shared {
     /// The page has registered its event listeners; until then events wait in `early_emits`.
     pub page_ready: AtomicBool,
     pub early_emits: Mutex<Vec<(String, Value)>>,
+    /// A limit-reset logo is on screen until a click anywhere (logo.dismiss "anyClick"); the
+    /// cursor poll watches the mouse buttons. Clicks before `logo_armed_at` (unix ms) do not count.
+    pub logo_any_click: AtomicBool,
+    pub logo_armed_at: AtomicI64,
 }
 
 impl Shared {
@@ -128,26 +136,40 @@ impl Shared {
     }
 }
 
+/// The overlay page's commands do nothing for any other window (the settings window has its
+/// own). Tauri lets every window of the app call every command of the app: there is no app
+/// ACL manifest, so this check is the boundary.
+fn from_overlay(window: &tauri::WebviewWindow) -> bool {
+    window.label() == "main"
+}
+
 /// The page has registered its event listeners: deliver what arrived before.
 #[tauri::command]
-fn ready(app: AppHandle, shared: State<'_, Arc<Shared>>) {
-    events::page_ready(&app, &shared);
+fn ready(window: tauri::WebviewWindow, app: AppHandle, shared: State<'_, Arc<Shared>>) {
+    if from_overlay(&window) {
+        events::page_ready(&app, &shared);
+    }
 }
 
 #[tauri::command]
-fn item_done(shared: State<'_, Arc<Shared>>) {
-    if shared.active_items.fetch_sub(1, Ordering::SeqCst) <= 1 {
+fn item_done(window: tauri::WebviewWindow, shared: State<'_, Arc<Shared>>) {
+    if from_overlay(&window) && shared.active_items.fetch_sub(1, Ordering::SeqCst) <= 1 {
         shared.active_items.store(0, Ordering::SeqCst);
     }
 }
 
 #[tauri::command]
-fn rlog(message: String) {
-    util::log_line(&["renderer", &util::truncate(&message, 500)]);
+fn rlog(message: String, window: tauri::WebviewWindow) {
+    if from_overlay(&window) {
+        util::log_line(&["renderer", &util::truncate(&message, 500)]);
+    }
 }
 
 #[tauri::command]
-fn hot_rects(rects: Vec<Rect>, shared: State<'_, Arc<Shared>>) {
+fn hot_rects(rects: Vec<Rect>, window: tauri::WebviewWindow, shared: State<'_, Arc<Shared>>) {
+    if !from_overlay(&window) {
+        return;
+    }
     *shared.hot_rects.lock().unwrap() = rects
         .into_iter()
         .filter(|r| r.right > r.left && r.bottom > r.top)
@@ -155,13 +177,18 @@ fn hot_rects(rects: Vec<Rect>, shared: State<'_, Arc<Shared>>) {
 }
 
 #[tauri::command]
-fn answer(id: String, data: Value, app: AppHandle, shared: State<'_, Arc<Shared>>) {
-    events::finish_interactive(&app, &shared, &id, Some(data));
+fn answer(id: String, data: Value, window: tauri::WebviewWindow, app: AppHandle, shared: State<'_, Arc<Shared>>) {
+    if from_overlay(&window) {
+        events::finish_interactive(&app, &shared, &id, Some(data));
+    }
 }
 
 /// Keep a pending card alive longer (the user opened the free-text field).
 #[tauri::command]
-fn extend_wait(id: String, ms: u64, shared: State<'_, Arc<Shared>>) {
+fn extend_wait(id: String, ms: u64, window: tauri::WebviewWindow, shared: State<'_, Arc<Shared>>) {
+    if !from_overlay(&window) {
+        return;
+    }
     if let Some(p) = shared.pending.lock().unwrap().get_mut(&id) {
         p.deadline_ms = p.deadline_ms.max(util::now_ms() + ms as i64);
     }
@@ -170,7 +197,10 @@ fn extend_wait(id: String, ms: u64, shared: State<'_, Arc<Shared>>) {
 /// Take keyboard focus for the free-text field (true) and hand it back to the window that
 /// had it (false). Only while typing does the overlay ever become the active window.
 #[tauri::command]
-fn focus_input(active: bool, app: AppHandle, shared: State<'_, Arc<Shared>>) {
+fn focus_input(active: bool, window: tauri::WebviewWindow, app: AppHandle, shared: State<'_, Arc<Shared>>) {
+    if !from_overlay(&window) {
+        return;
+    }
     let Some(w) = events::window(&app) else { return };
     if active {
         if !shared.typing.swap(true, Ordering::SeqCst) {
@@ -182,6 +212,51 @@ fn focus_input(active: bool, app: AppHandle, shared: State<'_, Arc<Shared>>) {
         win::ensure_noactivate(&w);
         win::set_foreground_raw(shared.prev_foreground.swap(0, Ordering::SeqCst));
     }
+}
+
+/// The page shows a limit-reset logo that waits for a click (`visible`), or no longer does.
+/// `any_click`: a click anywhere on the screen dismisses it, so the mouse buttons are watched.
+#[tauri::command]
+fn logo_state(visible: bool, any_click: bool, window: tauri::WebviewWindow, shared: State<'_, Arc<Shared>>) {
+    if from_overlay(&window) {
+        events::watch_logo_clicks(&shared, visible && any_click);
+    }
+}
+
+// The settings window's commands. Async: they run off the main thread, since some write files,
+// start PowerShell (Startup shortcut) or reach the network (phone test).
+
+/// The settings the page shows, and what is derived from elsewhere (never a token).
+#[tauri::command]
+async fn settings_get(window: tauri::WebviewWindow, shared: State<'_, Arc<Shared>>) -> Result<Value, String> {
+    settings::check_window(&window)?;
+    Ok(settings::get(&shared))
+}
+
+/// Change settings (`patch`: flat keys, `{"notification.durationMs": 6000}`); returns the new state.
+#[tauri::command]
+async fn settings_set(
+    patch: Value,
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    shared: State<'_, Arc<Shared>>,
+) -> Result<Value, String> {
+    settings::check_window(&window)?;
+    settings::set(&app, &shared, &patch)?;
+    Ok(settings::get(&shared))
+}
+
+/// A button (test banner, pairing code, Codex, Startup, open file...); returns the new state.
+#[tauri::command]
+async fn settings_action(
+    name: String,
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    shared: State<'_, Arc<Shared>>,
+) -> Result<Value, String> {
+    settings::check_window(&window)?;
+    settings::action(&app, &shared, &name)?;
+    Ok(settings::get(&shared))
 }
 
 /// Our app (HeadsUp, or Claude Overlay 2.x) answers the unauthenticated health check on the port.
@@ -368,12 +443,12 @@ fn main() {
         clear_markers();
     }
 
-    // Binding the port doubles as the single-instance lock: a second copy just pings the
-    // running one and exits (a copy started by a hook exits quietly).
+    // Binding the port doubles as the single-instance lock: a second copy started by hand
+    // opens the running one's Settings window and exits (a copy started by a hook exits quietly).
     let server = match tiny_http::Server::http(("127.0.0.1", port)) {
         Ok(s) => s,
         Err(e) => {
-            if from_hook || http::post(port, "test-notify", "{}", 1500).is_ok() {
+            if from_hook || http::post(port, "open-settings", "{}", 1500).is_ok() {
                 return;
             }
             // Something else holds the port: say so instead of exiting silently.
@@ -434,12 +509,26 @@ fn main() {
         remote_sessions: Mutex::new(HashSet::new()),
         page_ready: AtomicBool::new(false),
         early_emits: Mutex::new(Vec::new()),
+        logo_any_click: AtomicBool::new(false),
+        logo_armed_at: AtomicI64::new(0),
     });
 
     let setup_shared = shared.clone();
     let result = tauri::Builder::default()
         .manage(shared)
-        .invoke_handler(tauri::generate_handler![ready, item_done, rlog, hot_rects, answer, extend_wait, focus_input])
+        .invoke_handler(tauri::generate_handler![
+            ready,
+            item_done,
+            rlog,
+            hot_rects,
+            answer,
+            extend_wait,
+            focus_input,
+            logo_state,
+            settings_get,
+            settings_set,
+            settings_action
+        ])
         .setup(move |app| {
             let handle = app.handle().clone();
             let window = handle.get_webview_window("main").ok_or("main window missing")?;

@@ -14,8 +14,9 @@ Always-on-top notifications for **Claude Code** and the **Claude desktop app** (
 - **Reply ready / task finished** → banner at the top of the screen with the conversation or project name and, for Claude Code, the start of the last message.
 - **Asking permission** → banner with the full tool call (the command with its line breaks, the file and a preview of the change for edits, every field of an MCP tool) and **Allow / Deny** buttons. Hidden or text-direction Unicode characters show up as `⟦U+202E⟧`, and a cut is always marked (`… (+N more chars)`). Your click is the answer; Claude Code continues without you leaving the game.
 - **Asking a question** → banner with the question and its options as buttons, plus **Other…** to type your own answer. Click or type, and Claude gets the answer.
-- **Usage limit reset** (5-hour, weekly, spend limit) → animated logo in the top-right corner, even if no session is open.
+- **Usage limit reset** (5-hour, weekly, spend limit) → animated logo in the top-right corner, even if no session is open. It stays until you click, so you do not miss it.
 - Click-through, never steals focus, follows the monitor your cursor is on, optional soft chime.
+- A **Settings** window (tray → *Settings…*) for everything you would normally change, in English or Turkish.
 
 ## What Claude already does, and what this adds
 
@@ -41,7 +42,7 @@ What this adds on top:
 
 Needs the WebView2 runtime, which Windows 11 and up-to-date Windows 10 already have ([download](https://developer.microsoft.com/microsoft-edge/webview2/) otherwise).
 
-A tray icon (a teal square with two white chevrons and an amber dot) gives you test buttons, config, log, and uninstall. If the overlay is not running, the next hook starts it, except after tray → **Quit** (it then stays off until you start it yourself or log on again) and never from a Claude Code session running as Administrator. If you move the exe, run it once more and it re-points the hooks.
+A tray icon (a teal square with two white chevrons and an amber dot) gives you **Settings…** (also a double-click on the icon), test buttons, config, log, and uninstall. A left click opens its menu after a moment (the time Windows allows for a double-click), a right click at once. If the overlay is not running, the next hook starts it, except after tray → **Quit** (it then stays off until you start it yourself or log on again) and never from a Claude Code session running as Administrator. If you move the exe, run it once more and it re-points the hooks.
 
 Uninstall: tray → "Remove hooks", or `HeadsUp.exe --uninstall`. This removes the hooks, restores your original status line and Codex `notify`, removes the Startup shortcut and quits; hooks no longer start it. Starting the exe by hand installs everything again. `%USERPROFILE%\.headsup` (config, log, key) is kept; delete it to remove every trace.
 
@@ -64,13 +65,34 @@ When the same moment produces both a hook event and a toast, only one banner is 
 
 ### Answering from the banner
 
-For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the overlay open for `interactive.waitMs` (default 20 s; up to `phone.holdMs`, 8 minutes, when a phone channel is set up). The hooks are installed with a timeout longer than that, and the overlay repairs a shorter one on start; if Claude Code still gives up on the question hook, the open card moves over to the permission request Claude Code sends next, so the answer still arrives. Answers are keyed by the exact question text, so questions with Markdown or special characters are matched correctly. A click on **Allow**, **Deny** or an option is returned as the hook's JSON output (`decision` / `updatedInput.answers`), so Claude Code proceeds immediately. No click → the hook returns nothing and Claude Code's normal dialog appears. Without a phone channel, a focused Claude window, terminal or IDE while you are at the PC (input within the last 30 s, `interactive.skipOnlyIfActiveMs`) skips the card (`interactive.skipWhenFocused`), because you can see the dialog anyway. With a phone channel configured the card always shows: a question often arrives seconds after you sent the prompt, and only an open card can be relayed to the phone later. The overlay is click-through except over a card with buttons. It takes keyboard focus only while you type into the **Other…** field (the wait extends to 3 minutes for that) and hands focus back to the window that had it as soon as you send, press Esc, or the card is answered elsewhere.
+For `PermissionRequest` and `AskUserQuestion` the hook keeps its request to the overlay open for `interactive.waitMs` (default 20 s; up to `phone.holdMs`, 8 minutes, when a phone channel is set up). The hooks are installed with a timeout longer than that, and the overlay repairs a shorter one on start; if Claude Code still gives up on the question hook, the open card moves over to the permission request Claude Code sends next, so the answer still arrives. Answers are keyed by the exact question text, so questions with Markdown or special characters are matched correctly. A click on **Allow**, **Deny** or an option is returned as the hook's JSON output (`decision` / `updatedInput.answers`), so Claude Code proceeds immediately. No click → the hook returns nothing and Claude Code's normal dialog appears. Without a phone channel, a focused Claude window, terminal or IDE while you are at the PC (input within the last 30 s, `interactive.skipOnlyIfActiveMs`) skips the card (`interactive.skipWhenFocused`), because you can see the dialog anyway; `interactive.skipWhenActive` (Settings → Answer cards) turns that off. With a phone channel configured the card always shows: a question often arrives seconds after you sent the prompt, and only an open card can be relayed to the phone later. The overlay is click-through except over a card with buttons. It takes keyboard focus only while you type into the **Other…** field (the wait extends to 3 minutes for that) and hands focus back to the window that had it as soon as you send, press Esc, or the card is answered elsewhere.
 
 A card's buttons ignore clicks for 0.7 s after it appears or moves, and until the mouse has moved over it, so a click meant for the window underneath never answers it (the buttons look dimmed until then). The newest card is on top; when more cards are open than fit on screen, the rest wait behind a **+N** badge and come in as you answer. When Claude Code drops a request (you interrupted it in the terminal, or the hook timed out), its card closes by itself, on the PC and on the phone.
 
+## Settings
+
+Tray → **Settings…**, double-click the tray icon, or start `HeadsUp.exe` again while it runs. Every change applies at once (there is no Save button) and is written to `config.json`; a value that is out of range is pointed out and not saved.
+
+| Group | What you can change |
+|---|---|
+| General | language (automatic / English / Türkçe), sound, start with Windows |
+| Appearance | the logo on notifications from Claude (see below), how long a banner stays (3–30 s), the start of Claude's last message in task-finished banners |
+| Limit reset | which limits show the logo (5-hour, weekly, spend), how the logo goes away (see below), a test button |
+| Notifications | each Claude Code event, mirroring the Claude app's notifications and the list of apps to mirror, a test banner |
+| Answer cards | answering from the banner, how long a card waits (10–120 s), skipping the card while you are typing in a terminal, an editor or the Claude window |
+| Phone | sending to the phone, the idle time before anything is sent (0–60 min), what is sent, the Telegram bot token, pairing, the ntfy server / topic / token, a test message |
+| Remote sessions | on / off, permission mode, longest run (5–240 min); only once a Telegram chat is paired |
+| Codex CLI | task-finished banners for Codex on / off |
+
+Tokens can be replaced or cleared but are never shown again, not even to the settings window; neither is the paired chat. The port, the install records, the remote project list and the other keys in the table below that the window does not show stay in `config.json`.
+
+**Logo on notifications from Claude** (`logo.style`). By default every banner and the limit-reset logo show HeadsUp's own mark. Choose *Claude's logo* to show Claude's logo on banners that report something from Claude (Claude Code's hooks, the Claude app's notifications, limit resets): a white starburst on Claude orange, and the large animated starburst for a limit reset. Banners from other apps (Codex, apps in `toasts.watchApps`) and HeadsUp's own messages always show the HeadsUp mark, and HeadsUp's own icon (tray, window, exe) is always the HeadsUp mark: Claude's logo is never HeadsUp's logo. The accent colour of the banners follows the choice (orange or teal).
+
+**How the limit-reset logo goes away** (`logo.dismiss`). *Click anywhere* (default): the logo stays until you click anywhere on the screen with any mouse button; a click in its first 1.5 seconds does not count, so a click that was already under way cannot hide it. The overlay stays click-through: the click still reaches whatever you clicked, and while the logo is up the overlay only watches the mouse buttons (no mouse hook). *Click the logo*: only a click on the logo or its caption hides it. *By itself*: it leaves after `logo.durationMs` (9 s). A second reset while the logo is up adds its name to the caption instead of showing another logo. A click inside a window that runs as Administrator may not be seen; the logo then goes with the next click elsewhere, or a click on it.
+
 ## Configuration
 
-`%USERPROFILE%\.headsup\config.json` (tray → "Open config file", then "Reload config").
+`%USERPROFILE%\.headsup\config.json` (tray → "Open config file", then "Reload config"). The settings window covers the common keys; all of them are here.
 
 The settings live next to `~/.claude` rather than in AppData on purpose: the Claude desktop app is an MSIX package, and Windows redirects the AppData writes of processes it starts (Code tab hooks, and the overlay a hook starts) into the app's private copy, so an AppData folder would hold different files inside and outside the Claude app.
 
@@ -78,12 +100,14 @@ The settings live next to `~/.claude` rather than in AppData on purpose: the Cla
 |---|---|
 | `language` | `auto` (OS locale), `en`, `tr` |
 | `sound` | chime on banners and logo |
-| `notification.durationMs`, `logo.durationMs` | how long things stay on screen |
+| `logo.style` | `headsup` (default: the HeadsUp mark everywhere) or `claude` (Claude's logo on notifications from Claude); see [Settings](#settings) |
+| `logo.dismiss` | how the limit-reset logo goes away: `anyClick` (default), `logoClick` or `auto` |
+| `notification.durationMs`, `logo.durationMs` | how long a banner stays on screen; how long the logo stays with `logo.dismiss` `auto` |
 | `notification.showLastMessage` | include the start of Claude's last message in the task-finished banner |
 | `events.*` | per-event switches: `stop`, `permission_request`, `question`, `permission_prompt`, `idle_prompt`, `agent_needs_input`, `quota_auto_resume_fired` |
 | `toasts.watchApps` | app names / AUMIDs to mirror (default `["Claude"]`); add `"Codex"`, `"ChatGPT"`, `"Cursor"` or any app whose toasts you want on top of fullscreen apps |
 | `limits.*` | which windows trigger the logo (`five_hour`, `seven_day`, `spend_limit`) and `minUsedPercentage` |
-| `interactive.enabled`, `interactive.waitMs`, `interactive.skipWhenFocused` | answer questions and permission requests from the banner; how long to wait; foreground process names that skip the wait |
+| `interactive.enabled`, `interactive.waitMs`, `interactive.skipWhenActive`, `interactive.skipWhenFocused` | answer questions and permission requests from the banner; how long to wait; skip the card while one of the `skipWhenFocused` processes is in front and you are at the PC (`false`: the card always shows); those process names |
 | `remote.*` | remote sessions: `enabled`, `claudePath`, `model`, `permissionMode`, `projects`, `maxRunMinutes`, `busyGuardSeconds` |
 | `phone.*` | `enabled`, Telegram token / chat id, ntfy server / topic / token, `onlyWhenIdleMs`, `sendUnansweredAfterMs`, `deferWindowMs`, `holdMs`, per-event switches (`stop`, `permission`, `question`, `limit`) |
 
@@ -96,19 +120,19 @@ The same banners on your phone, and permission requests and questions answered f
 **Telegram, two-way**
 
 1. In Telegram open **@BotFather**, send `/newbot`, pick a name; copy the token. Use one bot per PC: two PCs (or Windows accounts) polling the same bot take each other's taps, and the overlay warns when it sees that.
-2. Tray → *Open config file* → put the token in `phone.telegram.token`, save, tray → *Reload config*. A banner shows an 8-character pairing code; tray → *Phone: show Telegram pairing code* shows it again.
-3. Open a private chat with your new bot and send that code (`/start CODE` works too). The overlay pairs itself with that chat and names the account it paired with. Only a private chat can pair, and only that chat is obeyed. After 10 wrong codes the code is blocked until you show a new one from the tray. To pair a different chat, clear `phone.telegram.chatId` and reload the config.
+2. Tray → *Settings…* → **Phone** → paste the token into *Bot token* → **Save** (or put it in `phone.telegram.token` in the config file, then *Reload config*). A banner shows an 8-character pairing code; *Show pairing code* in Settings, or tray → *Phone: show Telegram pairing code*, shows it again.
+3. Open a private chat with your new bot and send that code (`/start CODE` works too). The overlay pairs itself with that chat and names the account it paired with. Only a private chat can pair, and only that chat is obeyed. After 10 wrong codes the code is blocked until you show a new one from the tray. To pair a different chat, clear `phone.telegram.chatId` in the config file and reload it. Entering another bot's token in Settings (or clearing it) unpairs too: pair again with the new code, then switch remote sessions back on.
 4. Permission requests arrive with **Allow / Deny** buttons and questions with their options; a tap answers exactly like a click on the PC card. A card with several questions goes through them one at a time (1/3, 2/3, …); a question that allows several choices has ☐ / ☑ buttons and **✓ Done**. **✍️ Other…** opens Telegram's reply box for a typed answer. A permission request is answered only by its buttons or by a reply to that card's message (`allow` / `yes` / `ok` / `evet` / `izin`, or `deny` / `no` / `hayır` / `reddet`); a message that is not a reply never approves anything, it only answers the newest open question. Whichever side answers first wins; the PC card closes and the Telegram message is updated.
 
 **ntfy, one-way**
 
-Install the ntfy app, subscribe to a topic, put it in `phone.ntfy.topic` (`phone.ntfy.server` for a self-hosted ntfy). Banners arrive as push notifications, without buttons. Topics on ntfy.sh are public: anyone who knows or guesses the name can read the messages, which ntfy.sh keeps for about 12 hours. Use a long random topic name, or a reserved or access-controlled topic with its access token in `phone.ntfy.token` (sent as `Authorization: Bearer`). The overlay warns when the topic looks short or guessable and no token is set.
+Install the ntfy app, subscribe to a topic, enter it in Settings → Phone → *Topic* (`phone.ntfy.topic`; *Server*, `phone.ntfy.server`, an `https://` address, for a self-hosted ntfy). Banners arrive as push notifications, without buttons. Topics on ntfy.sh are public: anyone who knows or guesses the name can read the messages, which ntfy.sh keeps for about 12 hours. Use a long random topic name, or a reserved or access-controlled topic with its access token in `phone.ntfy.token` (sent as `Authorization: Bearer`). The overlay warns when the topic looks short or guessable and no token is set.
 
-Tray → *Phone: send test message* checks the setup, ignoring the idle rule. What is sent, and how it is protected, is listed under [Privacy and safety](#privacy-and-safety).
+Settings → Phone → *Send a test message* (or tray → *Phone: send test message*) checks the setup, ignoring the idle rule. What is sent, and how it is protected, is listed under [Privacy and safety](#privacy-and-safety).
 
 ## Remote sessions from the phone (Telegram)
 
-With Telegram set up, the paired chat can also **start a new Claude Code session** in a project, or **send a message to an existing session**, while you are away. Off by default: tray → *Phone: remote sessions*.
+With Telegram set up, the paired chat can also **start a new Claude Code session** in a project, or **send a message to an existing session**, while you are away. Off by default: Settings → *Remote sessions*, or tray → *Phone: remote sessions*.
 
 | Command | What it does |
 |---|---|
@@ -128,8 +152,8 @@ Safety: only the paired private chat is obeyed; the working directory always com
 |---|---|---|
 | Claude desktop app: Chat, Cowork | reply ready, question text (what the app's own notification carries) | notification-center bridge, automatic |
 | Claude Code: Code tab, CLI | everything: task finished with the start of the last message, Allow / Deny, answer questions (buttons or typed), limit reset | hooks, installed automatically |
-| Codex CLI / Codex app | task finished with the start of the last message | `notify` adapter: tray → **Codex CLI: enable notifications** (edits `~/.codex/config.toml`; a `notify` you already had keeps running, unless it is a `.bat` / `.cmd` script, which is not chained; disable restores it) |
-| Any other app (Cursor, Windsurf, ChatGPT desktop, …) | its Windows notifications, mirrored over fullscreen apps | add the app name to `toasts.watchApps` |
+| Codex CLI / Codex app | task finished with the start of the last message | `notify` adapter: Settings → **Codex CLI**, or tray → **Codex CLI: enable notifications** (edits `~/.codex/config.toml`; a `notify` you already had keeps running, unless it is a `.bat` / `.cmd` script, which is not chained; disable restores it) |
+| Any other app (Cursor, Windsurf, ChatGPT desktop, …) | its Windows notifications, mirrored over fullscreen apps | add the app name in Settings → Notifications → *Apps to mirror* (`toasts.watchApps`) |
 
 Codex under WSL: the adapter is a Windows script, so point `notify` in the WSL-side `~/.codex/config.toml` at it through interop:
 
@@ -159,7 +183,7 @@ powershell -ExecutionPolicy Bypass -File scripts/dist.ps1
 
 `dist.ps1` builds and writes `dist/HeadsUp.exe` and `dist/HeadsUp-win64.zip`. Releases are built by GitHub Actions from the tagged commit and carry `SHA256SUMS.txt` and a build provenance attestation (`gh attestation verify HeadsUp.exe -R goktugzaaa/headsup`). Run a build without touching your settings: set `HEADSUP_NO_INSTALL=1` and `HEADSUP_PORT=47899` (the 2.x names `CLAUDE_OVERLAY_NO_INSTALL` and `CLAUDE_OVERLAY_PORT` still work), start it, then run `HeadsUp.exe --send test-question` (or `test-permission`, `test-notify`, `test-logo`) with the same `HEADSUP_PORT`. A test run does not move Claude Overlay 2.x's data folder; it stops with a notice until that has happened. The endpoint only accepts requests signed with the key in `secret.key`, so plain `curl` posts are refused.
 
-Structure: `src-tauri/src/main.rs` (window, commands, CLI flags), `events.rs` (hook events, interactive cards, toast bridge, limit timers, cursor polling), `installer.rs` (hooks, status line, Startup shortcut), `http.rs` (signed 127.0.0.1 endpoint), `phone.rs` / `telegram.rs` (phone relay), `remote.rs` (remote sessions), `mask.rs` (secret masking), `tray.rs`, `i18n.rs`; `app/overlay.html` (banner + logo UI, embedded in the exe); `hooks/*.ps1` (what Claude Code and the toast listener run, embedded too).
+Structure: `src-tauri/src/main.rs` (windows, commands, CLI flags), `events.rs` (hook events, interactive cards, toast bridge, limit timers, cursor polling), `settings.rs` (settings window: whitelist, changes, buttons), `installer.rs` (hooks, status line, Startup shortcut), `http.rs` (signed 127.0.0.1 endpoint), `phone.rs` / `telegram.rs` (phone relay), `remote.rs` (remote sessions), `mask.rs` (secret masking), `tray.rs`, `i18n.rs`; `app/overlay.html` (banner + logo UI) and `app/settings.html` (settings window), embedded in the exe; `hooks/*.ps1` (what Claude Code and the toast listener run, embedded too).
 
 ## Privacy and safety
 
@@ -167,7 +191,7 @@ Structure: `src-tauri/src/main.rs` (window, commands, CLI flags), `events.rs` (h
 
 **What leaves the PC.** Nothing, unless you set a Telegram token or an ntfy topic. Then the following goes to `api.telegram.org` or your ntfy server: the tool name and the command, path or input of permission requests (up to 900 characters); questions, their options and your answers; the first 180 characters of Claude's last message; the text of notifications from the apps in `toasts.watchApps`; limit-reset notices; and, with remote sessions on, your prompts and the run's progress and results. Before anything is sent, text that looks like a secret is masked: API keys and tokens with known prefixes, `password=…` / `token: …` style values, `Bearer` / `Basic` credentials, passwords in URLs, private key blocks and long random-looking strings. Masking is a safety net, not a guarantee. The PC card is never masked, so you see exactly what you approve. Telegram cloud chats are not end-to-end encrypted, and ntfy.sh topics are public to anyone who knows the name (see [ntfy](#phone-telegram--ntfy)).
 
-**Tokens in config.json.** The Telegram bot token and the ntfy token are stored in plain text in `%USERPROFILE%\.headsup\config.json`. Anyone with the bot token controls the bot and can read your taps and replies, so do not share that file or `secret.key`. Neither appears in `events.log`. If the bot token leaks, revoke it in @BotFather (`/revoke`), put the new one in the config and reload it.
+**Tokens in config.json.** The Telegram bot token and the ntfy token are stored in plain text in `%USERPROFILE%\.headsup\config.json`. Anyone with the bot token controls the bot and can read your taps and replies, so do not share that file or `secret.key`. Neither appears in `events.log`, and the settings window can replace or clear them but never reads them back. If the bot token leaks, revoke it in @BotFather (`/revoke`) and enter the new one in Settings → Phone.
 
 **Control from the phone.** A new pairing needs the one-time code shown on the PC, and only that private chat is obeyed. A permission request is approved only with its button or a reply to that card. Remote sessions are off by default, run only in projects the PC already knows, never in a mode that runs commands without asking (`acceptEdits`, the most permissive one allowed, only applies file edits on its own), and never while the overlay runs as Administrator.
 

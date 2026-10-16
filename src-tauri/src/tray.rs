@@ -1,14 +1,20 @@
 use crate::phone::{self, PhoneMsg};
 use crate::{events, installer, util, Shared};
 use serde_json::json;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuBuilder};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Wry};
+
+/// When the tray icon was last double-clicked (unix ms).
+static LAST_DOUBLE_CLICK_MS: AtomicI64 = AtomicI64::new(0);
 
 fn make_menu(app: &AppHandle, shared: &Shared) -> tauri::Result<Menu<Wry>> {
     let t = &shared.t().tray;
     MenuBuilder::new(app)
+        .text("settings", t.settings)
+        .separator()
         .text("test_notify", t.test_notify)
         .text("test_logo", t.test_logo)
         .separator()
@@ -32,12 +38,15 @@ pub fn build(app: &AppHandle, shared: &Arc<Shared>) -> tauri::Result<()> {
     let menu = make_menu(app, shared)?;
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
     let s = shared.clone();
+    let s2 = shared.clone();
     let tray = TrayIconBuilder::with_id("main")
         .icon(icon)
         .tooltip(format!("HeadsUp · 127.0.0.1:{}", shared.port))
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        // A left click still opens the menu, but from on_icon: a double-click opens Settings.
+        .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| on_menu(app, &s, event.id.as_ref()))
+        .on_tray_icon_event(move |tray, event| on_icon(tray, &s2, event))
         .build(app)?;
     *shared.tray.lock().unwrap() = Some(tray);
     Ok(())
@@ -54,8 +63,37 @@ pub fn rebuild_menu(app: &AppHandle, shared: &Shared) {
     }
 }
 
-fn on_menu(app: &AppHandle, shared: &Arc<Shared>, id: &str) {
+/// Windows reports a double-click only after the first click, and the menu that click opens
+/// would swallow the second one: so a left click opens the menu once the double-click time has
+/// passed without a second click. A right click opens it at once (TrayIconBuilder's default).
+fn on_icon(tray: &TrayIcon, shared: &Arc<Shared>, event: TrayIconEvent) {
+    match event {
+        TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+            LAST_DOUBLE_CLICK_MS.store(util::now_ms(), Ordering::SeqCst);
+            crate::settings::open(tray.app_handle(), shared);
+        }
+        TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
+            let wait = crate::win::double_click_ms();
+            let clicked = util::now_ms();
+            if clicked - LAST_DOUBLE_CLICK_MS.load(Ordering::SeqCst) < wait {
+                return; // the release that ends a double-click
+            }
+            let tray = tray.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(wait as u64));
+                if LAST_DOUBLE_CLICK_MS.load(Ordering::SeqCst) < clicked {
+                    let _ = tray.with_inner_tray_icon(|t| t.show_menu());
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+/// A tray menu item. The settings window reuses these handlers for its buttons.
+pub fn on_menu(app: &AppHandle, shared: &Arc<Shared>, id: &str) {
     match id {
+        "settings" => crate::settings::open(app, shared),
         "test_notify" => events::handle_event(app, shared, "test-notify", &json!({})),
         "test_logo" => events::handle_event(app, shared, "test-logo", &json!({})),
         "reinstall" => match installer::install() {

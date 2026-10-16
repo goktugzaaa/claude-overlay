@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Overlay window: receive events from the host (the page's own commands need no permission)",
+  "description": "Overlay window only: receive events from the host. The app's own commands need no permission (there is no app ACL manifest); each checks which window calls it. The settings window has no capability: it uses no events or plugins.",
   "windows": ["main"],
   "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

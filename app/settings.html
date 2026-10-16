@@ -1,0 +1,811 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HeadsUp Settings</title>
+<style>
+  /* HeadsUp's own window: always the HeadsUp teal, whatever logo.style the banners use. Same
+     dark glass as the overlay. No inline styles anywhere (CSP): state is classes and attributes. */
+  :root {
+    color-scheme: dark;
+    --bg: #141416;
+    --card: rgba(255, 255, 255, 0.045);
+    --card-border: rgba(255, 255, 255, 0.09);
+    --line: rgba(255, 255, 255, 0.07);
+    --ink: rgba(255, 255, 255, 0.92);
+    --ink-2: rgba(255, 255, 255, 0.64);
+    --accent: #2EC4B6;
+    --accent-hover: #4fd3c7;
+    --accent-ink: #062b27; /* text on the accent: 7:1 */
+    --accent-rgb: 46, 196, 182;
+    --green: #4cc47a;
+    --red: #ff7a7f;
+    --amber: #ffc457;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    font-size: 14px; line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+  [hidden] { display: none !important; }
+
+  .wrap { max-width: 640px; margin: 0 auto; padding: 20px 20px 28px; }
+  header.top { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+  header.top svg { flex: none; width: 44px; height: 44px; }
+  h1 { font-size: 20px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  .lede { margin: 2px 0 0; color: var(--ink-2); font-size: 13px; }
+
+  section { margin-top: 22px; }
+  h2 {
+    font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--ink-2); margin: 0 0 8px 4px;
+  }
+  .note { color: var(--ink-2); font-size: 12.5px; margin: -2px 0 8px 4px; }
+  .note.lock { color: var(--amber); }
+  .card {
+    background: var(--card); border: 1px solid var(--card-border); border-radius: 14px;
+    overflow: hidden;
+  }
+  h3.sub {
+    margin: 0; padding: 12px 16px 2px; font-size: 12.5px; font-weight: 650; color: var(--ink-2);
+    border-top: 1px solid var(--line);
+  }
+  .card > :first-child { border-top: 0; }
+
+  .row {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    column-gap: 16px; row-gap: 8px;
+    padding: 12px 16px; border-top: 1px solid var(--line);
+  }
+  .row .text { flex: 1 1 240px; min-width: 0; }
+  .row.stack .text { flex-basis: 100%; }
+  .row.stack .ctl { flex: 1 1 100%; justify-content: flex-start; }
+  .row label.lbl, .row .lbl { display: block; font-weight: 600; font-size: 14px; }
+  .help { margin: 2px 0 0; color: var(--ink-2); font-size: 12.5px; }
+  .err { margin: 4px 0 0; color: var(--red); font-size: 12.5px; font-weight: 600; }
+  .ctl { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; margin-left: auto; }
+  .row.off .text { opacity: 0.55; }
+
+  /* "Saved" tick next to the control that changed. */
+  .saved {
+    color: var(--green); font-size: 12.5px; font-weight: 650; white-space: nowrap;
+    opacity: 0; transition: opacity 180ms;
+  }
+  .saved.show { opacity: 1; }
+  .row.busy .ctl { cursor: progress; }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Switch: a real checkbox (role=switch), drawn as a track and a knob. */
+  input[type="checkbox"].switch {
+    appearance: none; -webkit-appearance: none; margin: 0; flex: none;
+    width: 42px; height: 24px; border-radius: 999px; position: relative; cursor: pointer;
+    background: rgba(255, 255, 255, 0.16); border: 1px solid rgba(255, 255, 255, 0.18);
+    transition: background 140ms, border-color 140ms;
+  }
+  input[type="checkbox"].switch::before {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+    border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+    transition: transform 160ms cubic-bezier(0.3, 1.3, 0.5, 1);
+  }
+  input[type="checkbox"].switch:checked { background: var(--accent); border-color: transparent; }
+  input[type="checkbox"].switch:checked::before { transform: translateX(18px); }
+  input[type="checkbox"].switch:disabled { opacity: 0.4; cursor: default; }
+
+  /* Choice: radio buttons drawn as a segmented control; arrow keys move between them. */
+  .seg {
+    display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 3px;
+    background: rgba(0, 0, 0, 0.28); border: 1px solid var(--card-border); border-radius: 11px;
+  }
+  .seg label { position: relative; cursor: pointer; }
+  .seg input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+  .seg span {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 6px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--ink-2);
+    transition: background 120ms, color 120ms;
+  }
+  .seg label:hover span { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+  .seg input:checked + span { background: var(--accent); color: var(--accent-ink); }
+  .seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .seg input:disabled + span { opacity: 0.45; cursor: default; }
+  .seg b { font-weight: inherit; }
+  .seg i { font-style: normal; }
+  /* Small samples of the banner tile next to the logo choice. */
+  .tile { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; flex: none; }
+  .tile svg { width: 20px; height: 20px; }
+  .tile.claude { background: linear-gradient(160deg, #e8906f, #d97757 55%, #c4623f); }
+  .tile.claude svg { width: 14px; height: 14px; }
+  .tile.headsup { background: linear-gradient(180deg, #34D3C0, #14968C); }
+
+  input[type="number"], input[type="text"], input[type="password"] {
+    font: inherit; font-size: 14px; color: var(--ink);
+    background: rgba(0, 0, 0, 0.32); border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 9px;
+    height: 34px; padding: 0 10px; min-width: 0;
+  }
+  input[type="number"] { width: 84px; text-align: right; font-variant-numeric: tabular-nums; }
+  input:focus { border-color: rgba(var(--accent-rgb), 0.85); }
+  input[aria-invalid="true"] { border-color: var(--red); }
+  input:disabled { opacity: 0.45; }
+  .num { display: inline-flex; align-items: center; gap: 6px; }
+  .unit { color: var(--ink-2); font-size: 13px; min-width: 22px; }
+  .wide { flex: 1 1 220px; }
+  .chip {
+    font-size: 12px; font-weight: 650; padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+    background: rgba(255, 255, 255, 0.08); color: var(--ink-2);
+  }
+  .chip.on { background: rgba(76, 196, 122, 0.16); color: var(--green); }
+
+  .btn {
+    appearance: none; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer;
+    height: 34px; padding: 0 14px; border-radius: 9px; white-space: nowrap;
+    color: var(--ink); background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.14);
+    transition: background 120ms;
+  }
+  .btn:hover { background: rgba(255, 255, 255, 0.14); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  .btn.primary:hover { background: var(--accent-hover); }
+  .btn:disabled { opacity: 0.4; cursor: default; }
+  .btn:disabled:hover { background: rgba(255, 255, 255, 0.08); }
+  .btn.primary:disabled:hover { background: var(--accent); }
+
+  .status { display: inline-flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-2); flex: none; }
+  .dot.on { background: var(--green); }
+
+  footer { margin-top: 26px; color: var(--ink-2); font-size: 12.5px; }
+  footer .links { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  footer p { margin: 4px 2px 0; }
+  #load-error { color: var(--red); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <!-- The HeadsUp mark: HeadsUp's own icon. -->
+    <svg viewBox="0 0 100 100" aria-hidden="true" focusable="false">
+      <defs>
+        <linearGradient id="hu-g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#34D3C0"/><stop offset="1" stop-color="#14968C"/></linearGradient>
+        <mask id="hu-m"><rect width="100" height="100" fill="#fff"/><circle cx="75" cy="26" r="14" fill="#000"/></mask>
+      </defs>
+      <rect x="4" y="4" width="92" height="92" rx="22" fill="url(#hu-g)" mask="url(#hu-m)"/>
+      <polyline points="23,57 46,35 69,57" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="11.7"/>
+      <polyline points="29,77.5 46,62.5 63,77.5" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="9.4" opacity=".6"/>
+      <circle cx="75" cy="26" r="10" fill="#FFC457"/>
+    </svg>
+    <div>
+      <h1 data-t="title">Settings</h1>
+      <p class="lede" data-t="lede">Changes apply right away.</p>
+    </div>
+  </header>
+  <main id="main" aria-busy="true">
+    <p id="loading" data-t="loading">Loading…</p>
+    <p id="load-error" role="alert" hidden></p>
+  </main>
+  <footer id="footer" hidden>
+    <div class="links">
+      <button type="button" class="btn" data-action="open_config" data-t="open_config"></button>
+      <button type="button" class="btn" data-action="open_log" data-t="open_log"></button>
+      <button type="button" class="btn" data-action="open_readme" data-t="open_readme"></button>
+      <button type="button" class="btn" data-action="open_readme_config" data-t="open_readme_config"></button>
+    </div>
+    <p><span>HeadsUp</span> <span id="version"></span></p>
+    <p data-t="not_affiliated"></p>
+  </footer>
+</div>
+
+<script>
+  // The page talks to the host only through these three commands; it never sees a token or
+  // the paired chat id, and it gets no events (polls instead while it waits for pairing).
+  const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : () => Promise.reject('no host');
+  const api = {
+    get: () => invoke('settings_get'),
+    set: (patch) => invoke('settings_set', { patch }),
+    action: (name) => invoke('settings_action', { name }),
+  };
+
+  // ------------------------------------------------------------ strings
+  const STR = {
+    en: {
+      title: 'Settings', lede: 'Changes apply right away.', loading: 'Loading…',
+      load_error: 'The settings could not be loaded: ', saved: 'Saved', done: 'Done',
+      not_saved: 'Not saved: ', failed: 'That did not work: ',
+      'unit.s': 's', 'unit.min': 'min', 'unit.n': 'min',
+      range: 'Enter a number from {min} to {max}.',
+      apps_bad: 'Up to {n} apps, separated by commas, each at most {m} characters.',
+      url_bad: 'Enter an address that starts with https://',
+      topic_bad: 'Letters, digits, - and _ only, at most 64.',
+      tg_bad: 'This does not look like a bot token (123456789:AA…).',
+      token_bad: 'Enter the token without spaces.',
+
+      general: 'General',
+      language: 'Language', 'language.help': 'For banners, the tray menu and this window.',
+      'language.auto': 'Automatic', 'language.en': 'English', 'language.tr': 'Türkçe',
+      sound: 'Sound', 'sound.help': 'A soft chime with banners and the limit logo.',
+      startup: 'Start with Windows', 'startup.help': 'Start HeadsUp when you sign in to Windows.',
+
+      appearance: 'Appearance',
+      'logo.style': 'Logo on notifications from Claude',
+      'logo.style.help': 'HeadsUp\'s own icon (tray, this window) always stays the HeadsUp mark.',
+      'logo.style.claude': 'Claude\'s logo', 'logo.style.headsup': 'HeadsUp mark',
+      'notification.durationMs': 'Banner duration', 'notification.durationMs.help': 'How long a banner stays on screen, 3 to 30 seconds.',
+      'notification.showLastMessage': 'Show the start of the last message',
+      'notification.showLastMessage.help': 'Task-finished banners include the start of Claude\'s last message.',
+
+      limits: 'Limit reset',
+      'limits.note': 'When a usage limit resets, an animated logo shows in the top-right corner.',
+      'limits.five_hour': '5-hour limit', 'limits.five_hour.help': 'Show the logo when the 5-hour limit resets.',
+      'limits.seven_day': 'Weekly limit', 'limits.seven_day.help': 'Show the logo when the weekly limit resets.',
+      'limits.spend_limit': 'Spend limit', 'limits.spend_limit.help': 'Show the logo when the spend limit resets.',
+      'logo.dismiss': 'How the logo goes away',
+      'logo.dismiss.help': 'So that you never miss a reset, the logo can stay until you click.',
+      'logo.dismiss.anyClick': 'Click anywhere', 'logo.dismiss.logoClick': 'Click the logo', 'logo.dismiss.auto': 'By itself',
+      'logo.durationMs': 'Hide after', 'logo.durationMs.help': 'With "By itself" only: 3 to 60 seconds.',
+      test_logo: 'Show the logo', 'test_logo.help': 'Try it with the settings above.',
+
+      notifications: 'Notifications',
+      'events.stop': 'Task finished', 'events.stop.help': 'Claude Code finished a task.',
+      'events.permission_request': 'Permission request', 'events.permission_request.help': 'Claude Code wants to run a tool: Allow or Deny from the banner.',
+      'events.question': 'Question', 'events.question.help': 'Claude Code asks a question: answer from the banner.',
+      'events.permission_prompt': 'Permission prompt', 'events.permission_prompt.help': 'Claude Code is waiting for an approval in its own dialog.',
+      'events.agent_needs_input': 'Waiting for input', 'events.agent_needs_input.help': 'Claude Code needs your input to go on.',
+      'events.idle_prompt': 'Idle reminder', 'events.idle_prompt.help': 'Claude Code has been waiting for you for a while.',
+      'events.quota_auto_resume_fired': 'Auto-resume after a limit', 'events.quota_auto_resume_fired.help': 'A limit reset while Claude Code was waiting to go on.',
+      'toasts.enabled': 'Mirror Claude app notifications', 'toasts.enabled.help': 'Chat and Cowork notifications from Windows, shown on top of everything.',
+      'toasts.watchApps': 'Apps to mirror', 'toasts.watchApps.help': 'App names, separated by commas (up to 20): add Codex, ChatGPT, Cursor…',
+      test_banner: 'Show a test banner', 'test_banner.help': 'A sample task-finished banner.',
+
+      cards: 'Answer cards',
+      'interactive.enabled': 'Answer from the banner', 'interactive.enabled.help': 'Questions and permission requests get buttons on the banner.',
+      'interactive.waitMs': 'Wait for an answer', 'interactive.waitMs.help': 'How long a card waits for your click, 10 to 120 seconds. Then Claude Code shows its own dialog.',
+      'interactive.skipWhenActive': 'Skip it while I am at the terminal or in Claude',
+      'interactive.skipWhenActive.help': 'No card while you are typing in a terminal, an editor or the Claude window: its own dialog is right in front of you. With the phone set up, cards always show.',
+
+      phone: 'Phone',
+      'phone.enabled': 'Send to the phone', 'phone.enabled.help': 'Banners, questions and permission requests on your phone, through Telegram or ntfy.',
+      'phone.onlyWhenIdleMs': 'Only when I am away for', 'phone.onlyWhenIdleMs.help': 'Minutes without mouse or keyboard input before anything is sent (0 = always, up to 60).',
+      phone_events: 'What to send',
+      'phone.events.stop': 'Task finished', 'phone.events.permission': 'Permission requests',
+      'phone.events.question': 'Questions', 'phone.events.limit': 'Limit resets',
+      telegram: 'Telegram',
+      'phone.telegram.token': 'Bot token', 'phone.telegram.token.help': 'From @BotFather. Saved in config.json and never shown again.',
+      token_set: 'Set', token_unset: 'Not set', token_placeholder: 'Paste a new token', save: 'Save', clear: 'Clear',
+      pairing: 'Chat', paired: 'Paired with your Telegram chat.', unpaired: 'Not paired yet: show the code and send it to your bot.',
+      no_token: 'Add a bot token first.', pairing_code: 'Show pairing code',
+      ntfy: 'ntfy',
+      'phone.ntfy.server': 'Server', 'phone.ntfy.server.help': 'https://ntfy.sh or your own server.',
+      'phone.ntfy.topic': 'Topic', 'phone.ntfy.topic.help': 'Use a long random name: anyone who knows it can read the messages. Empty = off.',
+      'phone.ntfy.token': 'Access token', 'phone.ntfy.token.help': 'For reserved or protected topics (optional).',
+      phone_test: 'Send a test message', 'phone_test.help': 'Checks the setup now, even while you are at the PC.',
+
+      remote: 'Remote sessions', 'remote.locked': 'Pair a Telegram chat first (Phone, above).',
+      'remote.enabled': 'Allow remote sessions', 'remote.enabled.help': 'Your paired Telegram chat can start and continue Claude Code sessions on this PC.',
+      'remote.permissionMode': 'Permission mode', 'remote.permissionMode.help': '"Accept edits" applies file edits without asking; commands still wait for your Allow.',
+      'remote.permissionMode.default': 'Ask', 'remote.permissionMode.plan': 'Plan only', 'remote.permissionMode.acceptEdits': 'Accept edits',
+      'remote.maxRunMinutes': 'Longest run', 'remote.maxRunMinutes.help': 'A remote run is stopped after this many minutes, 5 to 240.',
+
+      codex: 'Codex CLI',
+      codex_switch: 'Codex CLI notifications', 'codex_switch.help': 'Task-finished banners for Codex. Edits ~/.codex/config.toml; turning it off restores it.',
+
+      open_config: 'Open config file', open_log: 'Open event log', open_readme: 'Help (README)', open_readme_config: 'All config keys',
+      not_affiliated: 'Independent community project, not affiliated with or endorsed by Anthropic.',
+    },
+    tr: {
+      title: 'Ayarlar', lede: 'Değişiklikler hemen uygulanır.', loading: 'Yükleniyor…',
+      load_error: 'Ayarlar yüklenemedi: ', saved: 'Kaydedildi', done: 'Tamam',
+      not_saved: 'Kaydedilmedi: ', failed: 'Olmadı: ',
+      'unit.s': 'sn', 'unit.min': 'dk', 'unit.n': 'dk',
+      range: '{min} ile {max} arasında bir sayı gir.',
+      apps_bad: 'Virgülle ayrılmış en fazla {n} uygulama; her biri en fazla {m} karakter.',
+      url_bad: 'https:// ile başlayan bir adres gir.',
+      topic_bad: 'Yalnızca harf, rakam, - ve _; en fazla 64.',
+      tg_bad: 'Bu bir bot token\'ına benzemiyor (123456789:AA…).',
+      token_bad: 'Token\'ı boşluksuz gir.',
+
+      general: 'Genel',
+      language: 'Dil', 'language.help': 'Bildirimler, tepsi menüsü ve bu pencere için.',
+      'language.auto': 'Otomatik', 'language.en': 'English', 'language.tr': 'Türkçe',
+      sound: 'Ses', 'sound.help': 'Bildirimlerde ve limit logosunda yumuşak bir zil sesi.',
+      startup: 'Windows ile başlat', 'startup.help': 'Windows\'a giriş yapınca HeadsUp\'ı başlat.',
+
+      appearance: 'Görünüm',
+      'logo.style': 'Claude bildirimlerinde logo',
+      'logo.style.help': 'HeadsUp\'ın kendi simgesi (tepsi, bu pencere) her zaman HeadsUp işareti olarak kalır.',
+      'logo.style.claude': 'Claude logosu', 'logo.style.headsup': 'HeadsUp işareti',
+      'notification.durationMs': 'Bildirim süresi', 'notification.durationMs.help': 'Bir bildirimin ekranda kalma süresi, 3 ile 30 saniye arası.',
+      'notification.showLastMessage': 'Son mesajın başını göster',
+      'notification.showLastMessage.help': 'Görev bitti bildiriminde Claude\'un son mesajının başı da görünür.',
+
+      limits: 'Limit yenilenmesi',
+      'limits.note': 'Bir kullanım limiti yenilenince sağ üst köşede animasyonlu bir logo çıkar.',
+      'limits.five_hour': '5 saatlik limit', 'limits.five_hour.help': '5 saatlik limit yenilenince logoyu göster.',
+      'limits.seven_day': 'Haftalık limit', 'limits.seven_day.help': 'Haftalık limit yenilenince logoyu göster.',
+      'limits.spend_limit': 'Harcama limiti', 'limits.spend_limit.help': 'Harcama limiti yenilenince logoyu göster.',
+      'logo.dismiss': 'Logo nasıl kapansın',
+      'logo.dismiss.help': 'Bir yenilenmeyi kaçırmaman için logo sen tıklayana kadar kalabilir.',
+      'logo.dismiss.anyClick': 'Herhangi bir yere tıkla', 'logo.dismiss.logoClick': 'Logoya tıkla', 'logo.dismiss.auto': 'Kendiliğinden',
+      'logo.durationMs': 'Kapanma süresi', 'logo.durationMs.help': 'Yalnızca "Kendiliğinden" seçiliyken: 3 ile 60 saniye arası.',
+      test_logo: 'Logoyu göster', 'test_logo.help': 'Yukarıdaki ayarlarla dene.',
+
+      notifications: 'Bildirimler',
+      'events.stop': 'Görev tamamlandı', 'events.stop.help': 'Claude Code bir görevi bitirdi.',
+      'events.permission_request': 'İzin isteği', 'events.permission_request.help': 'Claude Code bir araç çalıştırmak istiyor: bildirimden İzin ver ya da Reddet.',
+      'events.question': 'Soru', 'events.question.help': 'Claude Code bir soru soruyor: bildirimden cevapla.',
+      'events.permission_prompt': 'İzin uyarısı', 'events.permission_prompt.help': 'Claude Code kendi penceresinde onay bekliyor.',
+      'events.agent_needs_input': 'Girdi bekleniyor', 'events.agent_needs_input.help': 'Claude Code devam etmek için girdini bekliyor.',
+      'events.idle_prompt': 'Bekleme hatırlatması', 'events.idle_prompt.help': 'Claude Code bir süredir seni bekliyor.',
+      'events.quota_auto_resume_fired': 'Limitten sonra otomatik devam', 'events.quota_auto_resume_fired.help': 'Claude Code devam etmek için beklerken limit yenilendi.',
+      'toasts.enabled': 'Claude uygulamasının bildirimlerini göster', 'toasts.enabled.help': 'Windows\'tan gelen Chat ve Cowork bildirimleri, her şeyin üstünde.',
+      'toasts.watchApps': 'Gösterilecek uygulamalar', 'toasts.watchApps.help': 'Virgülle ayrılmış uygulama adları (en fazla 20): Codex, ChatGPT, Cursor… ekleyebilirsin.',
+      test_banner: 'Test bildirimi göster', 'test_banner.help': 'Örnek bir görev bitti bildirimi.',
+
+      cards: 'Cevap kartları',
+      'interactive.enabled': 'Bildirimden cevapla', 'interactive.enabled.help': 'Sorular ve izin istekleri bildirimde butonlarla gelir.',
+      'interactive.waitMs': 'Cevap bekleme süresi', 'interactive.waitMs.help': 'Kartın tıklamanı beklediği süre, 10 ile 120 saniye arası. Sonra Claude Code kendi penceresini gösterir.',
+      'interactive.skipWhenActive': 'Terminalde ya da Claude\'dayken kart gösterme',
+      'interactive.skipWhenActive.help': 'Bir terminalde, editörde ya da Claude penceresinde yazarken kart çıkmaz: kendi penceresi zaten önünde. Telefon ayarlıysa kartlar her zaman çıkar.',
+
+      phone: 'Telefon',
+      'phone.enabled': 'Telefona gönder', 'phone.enabled.help': 'Bildirimler, sorular ve izin istekleri telefonunda, Telegram ya da ntfy ile.',
+      'phone.onlyWhenIdleMs': 'Yalnızca şu kadar uzaktaysam', 'phone.onlyWhenIdleMs.help': 'Bir şey gönderilmeden önce fare ve klavyenin kullanılmadığı dakika (0 = her zaman, en fazla 60).',
+      phone_events: 'Neler gönderilsin',
+      'phone.events.stop': 'Görev tamamlandı', 'phone.events.permission': 'İzin istekleri',
+      'phone.events.question': 'Sorular', 'phone.events.limit': 'Limit yenilenmeleri',
+      telegram: 'Telegram',
+      'phone.telegram.token': 'Bot token\'ı', 'phone.telegram.token.help': '@BotFather\'dan. config.json\'a kaydedilir ve bir daha gösterilmez.',
+      token_set: 'Ayarlı', token_unset: 'Ayarlı değil', token_placeholder: 'Yeni token\'ı yapıştır', save: 'Kaydet', clear: 'Temizle',
+      pairing: 'Sohbet', paired: 'Telegram sohbetinle eşleşti.', unpaired: 'Henüz eşleşmedi: kodu göster ve botuna gönder.',
+      no_token: 'Önce bir bot token\'ı ekle.', pairing_code: 'Eşleştirme kodunu göster',
+      ntfy: 'ntfy',
+      'phone.ntfy.server': 'Sunucu', 'phone.ntfy.server.help': 'https://ntfy.sh ya da kendi sunucun.',
+      'phone.ntfy.topic': 'Topic', 'phone.ntfy.topic.help': 'Uzun, rastgele bir ad kullan: onu bilen herkes mesajları okuyabilir. Boş = kapalı.',
+      'phone.ntfy.token': 'Erişim token\'ı', 'phone.ntfy.token.help': 'Ayrılmış ya da korumalı topic\'ler için (isteğe bağlı).',
+      phone_test: 'Test mesajı gönder', 'phone_test.help': 'Kurulumu hemen dener, PC başında olsan bile.',
+
+      remote: 'Uzaktan oturumlar', 'remote.locked': 'Önce bir Telegram sohbeti eşleştir (yukarıda, Telefon).',
+      'remote.enabled': 'Uzaktan oturumlara izin ver', 'remote.enabled.help': 'Eşleşmiş Telegram sohbetin bu PC\'de Claude Code oturumu başlatıp sürdürebilir.',
+      'remote.permissionMode': 'İzin modu', 'remote.permissionMode.help': '"Düzenlemeleri kabul et" dosya değişikliklerini sormadan uygular; komutlar yine İzin ver bekler.',
+      'remote.permissionMode.default': 'Sor', 'remote.permissionMode.plan': 'Yalnızca plan', 'remote.permissionMode.acceptEdits': 'Düzenlemeleri kabul et',
+      'remote.maxRunMinutes': 'En uzun çalışma', 'remote.maxRunMinutes.help': 'Uzaktan bir çalışma bu kadar dakika sonra durdurulur, 5 ile 240 arası.',
+
+      codex: 'Codex CLI',
+      codex_switch: 'Codex CLI bildirimleri', 'codex_switch.help': 'Codex için görev bitti bildirimleri. ~/.codex/config.toml düzenlenir; kapatınca eski hâline döner.',
+
+      open_config: 'Config dosyasını aç', open_log: 'Olay günlüğünü aç', open_readme: 'Yardım (README)', open_readme_config: 'Tüm config anahtarları',
+      not_affiliated: 'Bağımsız bir topluluk projesidir; Anthropic ile bağlantılı değildir, Anthropic tarafından onaylanmamıştır.',
+    },
+  };
+  let lang = 'en';
+  function t(key, vars) {
+    let s = (STR[lang] && STR[lang][key]) || STR.en[key] || key;
+    for (const [k, v] of Object.entries(vars || {})) s = s.split(`{${k}}`).join(String(v));
+    return s;
+  }
+
+  // ------------------------------------------------------------ layout
+  // key: a config key (settings_set); id: a row that is not one (actions, derived state).
+  // Labels are STR[key or id], help texts STR[... + '.help'].
+  const UNITS = { s: 1000, min: 60000, n: 1 };
+  const SECTIONS = [
+    { id: 'general', rows: [
+      { key: 'language', type: 'choice' },
+      { key: 'sound', type: 'switch' },
+      { id: 'startup', type: 'switch', value: (s) => s.startup, actions: ['startup_on', 'startup_off'] },
+    ] },
+    { id: 'appearance', rows: [
+      { key: 'logo.style', type: 'choice', tiles: true },
+      { key: 'notification.durationMs', type: 'number', unit: 's' },
+      { key: 'notification.showLastMessage', type: 'switch' },
+    ] },
+    { id: 'limits', note: 'limits.note', rows: [
+      { key: 'limits.five_hour', type: 'switch' },
+      { key: 'limits.seven_day', type: 'switch' },
+      { key: 'limits.spend_limit', type: 'switch' },
+      { key: 'logo.dismiss', type: 'choice' },
+      { key: 'logo.durationMs', type: 'number', unit: 's', when: (s) => s.values['logo.dismiss'] === 'auto' },
+      { id: 'test_logo', type: 'button', action: 'test_logo' },
+    ] },
+    { id: 'notifications', rows: [
+      { key: 'events.stop', type: 'switch' },
+      { key: 'events.permission_request', type: 'switch' },
+      { key: 'events.question', type: 'switch' },
+      { key: 'events.permission_prompt', type: 'switch' },
+      { key: 'events.agent_needs_input', type: 'switch' },
+      { key: 'events.idle_prompt', type: 'switch' },
+      { key: 'events.quota_auto_resume_fired', type: 'switch' },
+      { key: 'toasts.enabled', type: 'switch' },
+      { key: 'toasts.watchApps', type: 'apps', when: (s) => s.values['toasts.enabled'] },
+      { id: 'test_banner', type: 'button', action: 'test_banner' },
+    ] },
+    { id: 'cards', rows: [
+      { key: 'interactive.enabled', type: 'switch' },
+      { key: 'interactive.waitMs', type: 'number', unit: 's', when: (s) => s.values['interactive.enabled'] },
+      { key: 'interactive.skipWhenActive', type: 'switch', when: (s) => s.values['interactive.enabled'] },
+    ] },
+    { id: 'phone', rows: [
+      { key: 'phone.enabled', type: 'switch' },
+      { key: 'phone.onlyWhenIdleMs', type: 'number', unit: 'min' },
+      { sub: 'phone_events' },
+      { key: 'phone.events.stop', type: 'switch', noHelp: true },
+      { key: 'phone.events.permission', type: 'switch', noHelp: true },
+      { key: 'phone.events.question', type: 'switch', noHelp: true },
+      { key: 'phone.events.limit', type: 'switch', noHelp: true },
+      { sub: 'telegram' },
+      { key: 'phone.telegram.token', type: 'secret', isSet: (s) => s.telegram.tokenSet, check: 'telegram' },
+      { id: 'pairing', type: 'pairing' },
+      { sub: 'ntfy' },
+      { key: 'phone.ntfy.server', type: 'text', check: 'url' },
+      { key: 'phone.ntfy.topic', type: 'text', check: 'topic' },
+      { key: 'phone.ntfy.token', type: 'secret', isSet: (s) => s.ntfy.tokenSet, check: 'token' },
+      { id: 'phone_test', type: 'button', action: 'phone_test' },
+    ] },
+    { id: 'remote', lockedUnless: (s) => s.telegram.paired, lockNote: 'remote.locked', rows: [
+      { key: 'remote.enabled', type: 'switch' },
+      { key: 'remote.permissionMode', type: 'choice' },
+      { key: 'remote.maxRunMinutes', type: 'number', unit: 'n' },
+    ] },
+    { id: 'codex', rows: [
+      { id: 'codex_switch', type: 'switch', value: (s) => s.codex, actions: ['codex_on', 'codex_off'] },
+    ] },
+  ];
+
+  let state = null;
+  const rows = [];        // every built row: { def, el, ... }
+  const pending = new Set(); // keys / ids with a change on its way (not overwritten meanwhile)
+  let queue = Promise.resolve();
+
+  function el(tag, attrs, ...kids) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === false || v === null || v === undefined) continue;
+      if (k === 'class') e.className = v;
+      else if (k === 't') e.dataset.t = v;
+      else e.setAttribute(k, v === true ? '' : v);
+    }
+    for (const kid of kids) if (kid) e.append(kid);
+    return e;
+  }
+  const domId = (name) => 'f-' + name.replace(/[^A-Za-z0-9_-]/g, '-');
+
+  // Claude's starburst (banner tile sample) and the HeadsUp mark: attributes only (CSP).
+  const RAYS = [[0, 1, 10.5], [32, 0.78, 9.5], [58, 0.92, 10], [90, 0.7, 9], [118, 0.96, 10.5], [150, 0.74, 9],
+    [180, 1, 10.5], [212, 0.8, 9.5], [238, 0.9, 10], [270, 0.72, 9], [298, 0.95, 10.5], [330, 0.76, 9]];
+  function tileSvg(kind) {
+    if (kind === 'claude') {
+      const lines = RAYS.map(([deg, len, w]) => {
+        const a = (deg * Math.PI) / 180, r2 = 9 + 37 * len;
+        return `<line x1="${(50 + Math.cos(a) * 9).toFixed(1)}" y1="${(50 + Math.sin(a) * 9).toFixed(1)}" x2="${(50 + Math.cos(a) * r2).toFixed(1)}" y2="${(50 + Math.sin(a) * r2).toFixed(1)}" stroke="#fff" stroke-width="${w}" stroke-linecap="round"/>`;
+      }).join('');
+      return `<svg viewBox="0 0 100 100" aria-hidden="true">${lines}</svg>`;
+    }
+    const line = 'fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round"';
+    return `<svg viewBox="0 0 100 100" aria-hidden="true"><polyline points="23,57 46,35 69,57" ${line} stroke-width="11.7"/>`
+      + `<polyline points="29,77.5 46,62.5 63,77.5" ${line} stroke-width="9.4" opacity=".6"/><circle cx="75" cy="26" r="10" fill="#FFC457"/></svg>`;
+  }
+
+  // The label / help / error column every row has.
+  function textCol(row, name, labelFor, noHelp) {
+    const id = domId(name);
+    const lbl = labelFor
+      ? el('label', { class: 'lbl', for: labelFor, t: name })
+      : el('span', { class: 'lbl', id: id + '-lbl', t: name });
+    const help = noHelp ? null : el('p', { class: 'help', id: id + '-help', t: name + '.help' });
+    row.err = el('p', { class: 'err', id: id + '-err', 'aria-live': 'polite', hidden: true });
+    row.desc = [help && help.id, row.err.id].filter(Boolean).join(' ');
+    return el('div', { class: 'text' }, lbl, help, row.err);
+  }
+
+  function savedTick(row) {
+    row.saved = el('span', { class: 'saved', 'aria-live': 'polite' });
+    return row.saved;
+  }
+
+  function buildRow(def) {
+    const row = { def, name: def.key || def.id };
+    const id = domId(row.name);
+    const type = def.type;
+    if (type === 'switch') {
+      row.input = el('input', { type: 'checkbox', role: 'switch', class: 'switch', id });
+      row.el = el('div', { class: 'row' }, textCol(row, row.name, id, def.noHelp), el('div', { class: 'ctl' }, savedTick(row), row.input));
+      row.input.addEventListener('change', () => {
+        if (def.actions) runAction(row, row.input.checked ? def.actions[0] : def.actions[1], true);
+        else commit(row, { [def.key]: row.input.checked });
+      });
+    } else if (type === 'choice') {
+      const opts = state.schema[def.key].options;
+      row.radios = opts.map((o) => {
+        const input = el('input', { type: 'radio', name: id, value: o });
+        input.addEventListener('change', () => { if (input.checked) commit(row, { [def.key]: o }); });
+        const span = el('span', {}, def.tiles ? el('i', { class: `tile ${o}` }) : null, el('b', { t: `${def.key}.${o}` }));
+        if (def.tiles) span.firstChild.innerHTML = tileSvg(o);
+        return el('label', {}, input, span);
+      });
+      const text = textCol(row, row.name, null, def.noHelp);
+      const group = el('div', { class: 'seg', role: 'radiogroup', 'aria-labelledby': id + '-lbl', 'aria-describedby': row.desc }, ...row.radios);
+      row.el = el('div', { class: 'row stack' }, text, el('div', { class: 'ctl' }, group, savedTick(row)));
+      row.radios = row.radios.map((l) => l.querySelector('input'));
+    } else if (type === 'number') {
+      const sc = state.schema[def.key], f = UNITS[def.unit];
+      row.input = el('input', { type: 'number', id, inputmode: 'decimal', min: sc.min / f, max: sc.max / f, step: f === 1 ? 1 : 'any' });
+      row.el = el('div', { class: 'row' }, textCol(row, row.name, id, def.noHelp),
+        el('div', { class: 'ctl' }, savedTick(row), el('span', { class: 'num' }, row.input, el('span', { class: 'unit', t: 'unit.' + def.unit }))));
+      bindText(row, () => {
+        const n = Number(row.input.value.trim().replace(',', '.'));
+        const ms = Math.round(n * f);
+        if (row.input.value.trim() === '' || !Number.isFinite(n) || ms < sc.min || ms > sc.max) {
+          return { error: t('range', { min: sc.min / f, max: sc.max / f }) };
+        }
+        return { patch: { [def.key]: ms } };
+      });
+    } else if (type === 'apps' || type === 'text') {
+      row.input = el('input', { type: 'text', id, class: 'wide', spellcheck: 'false', autocomplete: 'off' });
+      row.el = el('div', { class: 'row stack' }, textCol(row, row.name, id, def.noHelp), el('div', { class: 'ctl' }, row.input, savedTick(row)));
+      bindText(row, () => checkText(def, row.input.value));
+    } else if (type === 'secret') {
+      row.chip = el('span', { class: 'chip' });
+      row.input = el('input', { type: 'password', id, class: 'wide', spellcheck: 'false', autocomplete: 'off', 'data-tp': 'token_placeholder' });
+      row.saveBtn = el('button', { type: 'button', class: 'btn primary', t: 'save' });
+      row.clearBtn = el('button', { type: 'button', class: 'btn', t: 'clear' });
+      row.el = el('div', { class: 'row stack' }, textCol(row, row.name, id, def.noHelp),
+        el('div', { class: 'ctl' }, row.chip, row.input, row.saveBtn, row.clearBtn, savedTick(row)));
+      const save = () => {
+        const v = row.input.value.trim();
+        if (!v) { row.input.focus(); return; }
+        const ok = def.check === 'telegram' ? /^\d+:[A-Za-z0-9_-]{20,}$/.test(v) : /^\S{1,256}$/.test(v);
+        if (!ok) { showError(row, t(def.check === 'telegram' ? 'tg_bad' : 'token_bad')); return; }
+        commit(row, { [def.key]: v }, () => { row.input.value = ''; });
+      };
+      row.saveBtn.addEventListener('click', save);
+      row.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
+      row.input.addEventListener('input', () => clearError(row));
+      row.clearBtn.addEventListener('click', () => commit(row, { [def.key]: '' }, () => { row.input.value = ''; }));
+    } else if (type === 'pairing') {
+      row.dot = el('span', { class: 'dot' });
+      row.statusText = el('span', {});
+      row.btn = el('button', { type: 'button', class: 'btn', t: 'pairing_code' });
+      row.err = el('p', { class: 'err', 'aria-live': 'polite', hidden: true });
+      row.el = el('div', { class: 'row' },
+        el('div', { class: 'text' }, el('span', { class: 'lbl', t: 'pairing' }),
+          el('p', { class: 'help status', 'aria-live': 'polite' }, row.dot, row.statusText), row.err),
+        el('div', { class: 'ctl' }, savedTick(row), row.btn));
+      row.btn.addEventListener('click', () => runAction(row, 'pairing_code'));
+    } else if (type === 'button') {
+      row.btn = el('button', { type: 'button', class: 'btn', t: def.id, 'aria-describedby': domId(def.id) + '-help' });
+      row.err = el('p', { class: 'err', 'aria-live': 'polite', hidden: true });
+      row.el = el('div', { class: 'row' },
+        el('div', { class: 'text' }, el('p', { class: 'help', id: domId(def.id) + '-help', t: def.id + '.help' }), row.err),
+        el('div', { class: 'ctl' }, savedTick(row), row.btn));
+      row.btn.addEventListener('click', () => runAction(row, def.action));
+    }
+    if (row.input && row.desc) row.input.setAttribute('aria-describedby', row.desc);
+    rows.push(row);
+    return row.el;
+  }
+  // Text and number fields are sent when they are committed (Enter, or leaving the field),
+  // checked first: an invalid value is shown, not sent.
+  function bindText(row, read) {
+    row.input.addEventListener('input', () => { row.dirty = true; clearError(row); });
+    const go = () => {
+      if (!row.dirty) return;
+      const r = read();
+      if (r.error) { showError(row, r.error); return; }
+      // Sent: from now on the field shows what the host has (also when it refuses).
+      row.dirty = false;
+      commit(row, r.patch);
+    };
+    row.input.addEventListener('change', go);
+    row.input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') go();
+      if (e.key === 'Escape' && row.dirty) { row.dirty = false; clearError(row); apply(state); }
+    });
+  }
+
+  function checkText(def, raw) {
+    const sc = state.schema[def.key];
+    if (def.type === 'apps') {
+      const seen = new Set(), apps = [];
+      for (const part of raw.split(',')) {
+        const a = part.trim();
+        if (!a || seen.has(a.toLowerCase())) continue;
+        seen.add(a.toLowerCase());
+        apps.push(a);
+      }
+      if (apps.length > sc.maxItems || apps.some((a) => a.length > sc.maxChars)) {
+        return { error: t('apps_bad', { n: sc.maxItems, m: sc.maxChars }) };
+      }
+      return { patch: { [def.key]: apps } };
+    }
+    const v = raw.trim();
+    // https only (an ntfy token goes to it), no user:password@ before the host.
+    if (def.check === 'url' && !(/^https:\/\/[^\s\/@]+(\/\S*)?$/i.test(v) && v.length <= sc.maxChars)) return { error: t('url_bad') };
+    if (def.check === 'topic' && !/^[A-Za-z0-9_-]{0,64}$/.test(v)) return { error: t('topic_bad') };
+    return { patch: { [def.key]: v } };
+  }
+
+  function build() {
+    const main = document.getElementById('main');
+    for (const sec of SECTIONS) {
+      const card = el('div', { class: 'card' });
+      const s = el('section', { 'aria-labelledby': 'h-' + sec.id },
+        el('h2', { id: 'h-' + sec.id, t: sec.id }),
+        sec.note ? el('p', { class: 'note', t: sec.note }) : null,
+        sec.lockNote ? el('p', { class: 'note lock', t: sec.lockNote, id: 'lock-' + sec.id, hidden: true }) : null,
+        card);
+      for (const def of sec.rows) {
+        if (def.sub) card.append(el('h3', { class: 'sub', t: def.sub }));
+        else card.append(buildRow(Object.assign({ section: sec }, def)));
+      }
+      main.append(s);
+    }
+    for (const b of document.querySelectorAll('footer [data-action]')) {
+      b.addEventListener('click', () => runAction({ btn: b }, b.dataset.action));
+    }
+    document.getElementById('loading').hidden = true;
+    document.getElementById('footer').hidden = false;
+    main.setAttribute('aria-busy', 'false');
+  }
+
+  function applyTexts() {
+    document.documentElement.lang = lang;
+    document.title = lang === 'tr' ? 'HeadsUp Ayarları' : 'HeadsUp Settings';
+    for (const n of document.querySelectorAll('[data-t]')) n.textContent = t(n.dataset.t);
+    for (const n of document.querySelectorAll('[data-tp]')) n.placeholder = t(n.dataset.tp);
+  }
+
+  // ------------------------------------------------------------ state -> controls
+  function apply(st) {
+    // First: the texts set below (token chip, pairing status) are in the new language.
+    if (st.lang !== lang) { lang = st.lang === 'tr' ? 'tr' : 'en'; applyTexts(); }
+    const v = st.values;
+    for (const row of rows) {
+      const def = row.def;
+      const busy = pending.has(row.name);
+      // A field with an edit not sent yet (being typed, or refused here) keeps it.
+      if (!busy && !row.dirty) {
+        if (def.type === 'switch') row.input.checked = !!(def.value ? def.value(st) : v[def.key]);
+        else if (def.type === 'choice') for (const r of row.radios) r.checked = r.value === v[def.key];
+        else if (def.type === 'number') row.input.value = String(+(v[def.key] / UNITS[def.unit]).toFixed(2));
+        else if (def.type === 'apps') row.input.value = (v[def.key] || []).join(', ');
+        else if (def.type === 'text') row.input.value = v[def.key] || '';
+      }
+      let on = def.when ? !!def.when(st) : true;
+      if (def.section.lockedUnless && !def.section.lockedUnless(st)) on = false;
+      if (def.type === 'secret') {
+        const set = def.isSet(st);
+        row.chip.textContent = t(set ? 'token_set' : 'token_unset');
+        row.chip.classList.toggle('on', set);
+        row.clearBtn.disabled = !set;
+      }
+      if (def.type === 'pairing') {
+        const tg = st.telegram;
+        row.dot.classList.toggle('on', tg.paired);
+        row.statusText.textContent = t(tg.paired ? 'paired' : tg.tokenSet ? 'unpaired' : 'no_token');
+        row.btn.disabled = !tg.tokenSet || tg.paired || !v['phone.enabled'];
+      }
+      row.el.classList.toggle('off', !on);
+      for (const c of row.el.querySelectorAll('input, button')) {
+        if (def.type === 'secret' && c === row.clearBtn) { if (!on) c.disabled = true; continue; }
+        if (def.type === 'pairing' && c === row.btn) continue;
+        c.disabled = !on;
+      }
+    }
+    for (const sec of SECTIONS) {
+      const lock = document.getElementById('lock-' + sec.id);
+      if (lock) lock.hidden = !sec.lockedUnless || !!sec.lockedUnless(st);
+    }
+    document.getElementById('version').textContent = st.version;
+    schedulePoll();
+  }
+
+  // ------------------------------------------------------------ changes
+  function showError(row, msg) {
+    if (!row.err) return;
+    row.err.textContent = msg;
+    row.err.hidden = false;
+    if (row.input) row.input.setAttribute('aria-invalid', 'true');
+  }
+  function clearError(row) {
+    if (!row.err) return;
+    row.err.hidden = true;
+    row.err.textContent = '';
+    if (row.input) row.input.removeAttribute('aria-invalid');
+  }
+  function flash(row, key) {
+    if (!row.saved) return;
+    clearTimeout(row.flashTimer);
+    row.saved.textContent = '';
+    // Emptied first, so screen readers announce it again.
+    row.flashTimer = setTimeout(() => {
+      row.saved.textContent = '✓ ' + t(key);
+      row.saved.classList.add('show');
+      row.flashTimer = setTimeout(() => row.saved.classList.remove('show'), 1800);
+    }, 30);
+  }
+  const reason = (e) => String((e && e.message) || e || '');
+
+  // Changes go out one after another, so an older answer never undoes a newer click.
+  function enqueue(row, job) {
+    pending.add(row.name);
+    if (row.el) row.el.classList.add('busy');
+    queue = queue.then(job).finally(() => {
+      pending.delete(row.name);
+      if (row.el) row.el.classList.remove('busy');
+    });
+  }
+
+  function commit(row, patch, onSaved) {
+    clearError(row);
+    enqueue(row, async () => {
+      try {
+        state = await api.set(patch);
+        if (onSaved) onSaved();
+        pending.delete(row.name);
+        apply(state);
+        flash(row, 'saved');
+      } catch (e) {
+        pending.delete(row.name);
+        apply(state);
+        showError(row, t('not_saved') + reason(e));
+      }
+    });
+  }
+
+  function runAction(row, name, isSwitch) {
+    if (row.err) clearError(row);
+    enqueue(row.def ? row : { name: 'action:' + name }, async () => {
+      if (row.btn) row.btn.disabled = true;
+      try {
+        state = await api.action(name);
+        if (isSwitch) pending.delete(row.name);
+        apply(state);
+        flash(row, isSwitch ? 'saved' : 'done');
+      } catch (e) {
+        if (isSwitch) pending.delete(row.name);
+        apply(state);
+        if (row.err) showError(row, t('failed') + reason(e));
+      } finally {
+        if (row.btn && !row.def) row.btn.disabled = false;
+        if (row.btn && row.def && row.def.type === 'button') row.btn.disabled = false;
+      }
+    });
+  }
+
+  // ------------------------------------------------------------ refresh
+  // The host sends no events here: the state is read again when the window comes back to the
+  // front, and every few seconds while a Telegram chat is waiting to pair.
+  let pollTimer = null;
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    const waiting = state && state.telegram.tokenSet && !state.telegram.paired;
+    if (waiting) pollTimer = setTimeout(refresh, 4000);
+  }
+  async function refresh() {
+    if (pending.size) { schedulePoll(); return; }
+    try {
+      state = await api.get();
+      apply(state);
+    } catch (e) { /* the window may be closing */ }
+  }
+  window.addEventListener('focus', refresh);
+
+  (async () => {
+    try {
+      state = await api.get();
+    } catch (e) {
+      document.getElementById('loading').hidden = true;
+      const err = document.getElementById('load-error');
+      err.textContent = t('load_error') + reason(e);
+      err.hidden = false;
+      return;
+    }
+    lang = state.lang === 'tr' ? 'tr' : 'en';
+    build();
+    applyTexts();
+    apply(state);
+  })();
+</script>
+</body>
+</html>

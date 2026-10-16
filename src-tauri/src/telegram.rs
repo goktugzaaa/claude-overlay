@@ -623,6 +623,7 @@ fn pairing_attempt(app: &AppHandle, shared: &Arc<Shared>, c: &Creds, m: &Value, 
 
 fn pair(shared: &Shared, chat: &str) -> bool {
     let path = util::config_path();
+    let lock = util::lock_config();
     let mut cfg = match util::read_json(&path) {
         Some(v) if v.is_object() => v,
         // Never overwrite a config.json that exists but does not parse.
@@ -647,6 +648,7 @@ fn pair(shared: &Shared, chat: &str) -> bool {
     if util::write_json(&util::config_path(), &cfg).is_err() {
         return false;
     }
+    drop(lock);
     shared.reload_config();
     util::log_line(&["telegram-paired", &util::tail_id(chat)]);
     true

@@ -99,20 +99,76 @@ fn emit_page(app: &AppHandle, shared: &Shared, channel: &str, payload: Value) {
 }
 
 /// The page has registered its listeners (or the fallback timer gave up waiting): deliver
-/// everything that arrived before, in order.
+/// everything that arrived before, in order, then the look to use. The look is sent on every
+/// call: a page that was reloaded starts with the default one.
 pub fn page_ready(app: &AppHandle, shared: &Shared) {
+    let style = style_payload(&shared.cfg());
     let mut queue = shared.early_emits.lock().unwrap();
-    if shared.page_ready.swap(true, Ordering::SeqCst) {
-        return;
+    if !shared.page_ready.swap(true, Ordering::SeqCst) {
+        for (channel, payload) in queue.drain(..) {
+            let _ = app.emit(&channel, payload);
+        }
     }
-    for (channel, payload) in queue.drain(..) {
-        let _ = app.emit(&channel, payload);
+    let _ = app.emit("style", style);
+}
+
+/// The page's look (accent colour) follows logo.style. Which logo each banner shows is decided
+/// here, per banner (`icon`); the page never sees the config.
+fn style_payload(cfg: &Value) -> Value {
+    json!({"style": config::logo_style(cfg)})
+}
+
+/// Send the look again after the config was reloaded.
+fn send_style(app: &AppHandle, shared: &Shared) {
+    emit_page(app, shared, "style", style_payload(&shared.cfg()));
+}
+
+/// The logo a banner shows: Claude's for news from Claude (Claude Code hooks, the Claude app's
+/// toasts, limit resets) while logo.style is "claude"; otherwise, and for HeadsUp's own
+/// messages, Codex and other apps' toasts, the HeadsUp mark.
+fn icon(cfg: &Value, from_claude: bool) -> &'static str {
+    if from_claude && config::logo_style(cfg) == "claude" {
+        "claude"
+    } else {
+        "headsup"
     }
 }
 
+/// Hook events come from Claude Code unless an adapter for another agent says otherwise (the
+/// Codex adapter sends "agent": "codex").
+fn from_claude_code(event: &Value) -> bool {
+    event
+        .get("agent")
+        .and_then(Value::as_str)
+        .is_none_or(|a| a.trim().is_empty() || a.trim().eq_ignore_ascii_case("claude"))
+}
+
+/// A toast from the Claude desktop app: its display name, or its app id (the Store package
+/// "Claude_…", or the older installer's "…AnthropicClaude…").
+fn claude_app(name: &str, aumid: &str) -> bool {
+    let id = aumid.trim().to_ascii_lowercase();
+    name.trim().eq_ignore_ascii_case("claude") || id.starts_with("claude_") || id.contains("anthropic")
+}
+
+/// A banner from HeadsUp itself or from anything other than Claude: it shows the HeadsUp mark.
 pub fn notify(
     app: &AppHandle,
     shared: &Shared,
+    title: &str,
+    subtitle: &str,
+    body: &str,
+    kind: &str,
+    duration_ms: Option<u64>,
+) {
+    banner(app, shared, false, title, subtitle, body, kind, duration_ms);
+}
+
+/// A banner; `from_claude`: it reports something from Claude (see `icon`).
+#[allow(clippy::too_many_arguments)]
+fn banner(
+    app: &AppHandle,
+    shared: &Shared,
+    from_claude: bool,
     title: &str,
     subtitle: &str,
     body: &str,
@@ -132,6 +188,7 @@ pub fn notify(
             "subtitle": subtitle,
             "body": body,
             "kind": kind,
+            "icon": icon(&cfg, from_claude),
             "nowLabel": t.now,
             "durationMs": dur,
             "sound": config::get_bool(&cfg, "sound", true),
@@ -139,18 +196,43 @@ pub fn notify(
     );
 }
 
+/// The limit-reset logo. With logo.dismiss "anyClick" or "logoClick" it stays until clicked
+/// (the page reports it with `logo_state`); with "auto" it leaves after logo.durationMs.
 pub fn show_logo(app: &AppHandle, shared: &Shared, caption: &str) {
     let cfg = shared.cfg();
+    let t = shared.t();
+    let dismiss = config::logo_dismiss(&cfg);
     emit(
         app,
         shared,
         "logo",
         json!({
             "caption": caption,
+            // A limit reset is news from Claude.
+            "icon": icon(&cfg, true),
+            "dismiss": dismiss,
+            "hint": match dismiss {
+                "anyClick" => t.logo_hint_any,
+                "logoClick" => t.logo_hint_logo,
+                _ => "",
+            },
             "durationMs": config::get_u64(&cfg, "logo.durationMs", 9000),
             "sound": config::get_bool(&cfg, "sound", true),
         }),
     );
+}
+
+/// A click anywhere must not dismiss the logo in its first moments: it may be one that was
+/// already under way when the logo appeared.
+const LOGO_CLICK_GUARD_MS: i64 = 1500;
+
+/// The page shows a limit-reset logo that waits for a click anywhere (`on`), or no longer
+/// does. Called again when a second reset updates the logo: the guard time starts over.
+pub fn watch_logo_clicks(shared: &Shared, on: bool) {
+    if on {
+        shared.logo_armed_at.store(util::now_ms() + LOGO_CLICK_GUARD_MS, Ordering::SeqCst);
+    }
+    shared.logo_any_click.store(on, Ordering::SeqCst);
 }
 
 fn with_project(label: &str, cwd: Option<&Value>) -> String {
@@ -456,7 +538,7 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
             // Adapters for other agents (Codex) send their own title.
             let title = event.get("title").and_then(Value::as_str).unwrap_or(t.code_name);
             let subtitle = with_project(t.task_done, event.get("cwd"));
-            notify(app, shared, title, &subtitle, &body, "done", None);
+            banner(app, shared, from_claude_code(event), title, &subtitle, &body, "done", None);
             let project = util::project_name(event.get("cwd"));
             if crate::remote::is_remote_session(shared, event.get("session_id").and_then(Value::as_str)) {
                 return; // the remote runner reports this run's result itself
@@ -501,12 +583,15 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
                 160,
             );
             let kind = if nt == "permission_prompt" { "permission" } else { "info" };
-            notify(app, shared, title, &with_project(label, event.get("cwd")), &body, kind, None);
+            banner(app, shared, from_claude_code(event), title, &with_project(label, event.get("cwd")), &body, kind, None);
         }
         "status" => handle_status(app, shared, event.get("status").unwrap_or(event)),
-        "test-notify" => notify(
+        // A sample of a Claude task-finished banner (titled "Claude"), so it shows the logo such
+        // banners get with the current logo.style.
+        "test-notify" => banner(
             app,
             shared,
+            false,
             t.app_name,
             &format!("{} · {}", t.task_done, t.test),
             t.test_body,
@@ -514,19 +599,32 @@ pub fn handle_event(app: &AppHandle, shared: &Arc<Shared>, kind: &str, event: &V
             None,
         ),
         "test-logo" => show_logo(app, shared, t.limit_five_hour),
-        "reload-config" => {
-            shared.reload_config();
-            if !crate::remote::enabled(shared) {
-                crate::remote::stop_running(app, shared, false);
-                crate::remote::clear_selection(shared);
-            }
-            // The page needs no config: never hand it the phone token or remote settings.
-            crate::tray::rebuild_menu(app, shared);
-            crate::telegram::on_reload(app, shared);
-        }
+        "reload-config" => reload(app, shared, true),
+        "open-settings" => crate::settings::open(app, shared),
         "quit" => quit(app, shared),
         _ => {}
     }
+}
+
+/// Apply config.json again. `telegram`: also retry a token Telegram rejected and show the
+/// pairing code again while no chat is paired (telegram::on_reload). Reload config always does;
+/// the settings window only when it changed the phone switch or the bot token, so other
+/// switches do not bring those banners back.
+pub fn reload(app: &AppHandle, shared: &Arc<Shared>, telegram: bool) {
+    shared.reload_config();
+    if !crate::remote::enabled(shared) {
+        crate::remote::stop_running(app, shared, false);
+        crate::remote::clear_selection(shared);
+    }
+    // The page needs no config: never hand it the phone token or remote settings. It
+    // only learns the look (logo.style).
+    send_style(app, shared);
+    resume_toast_listener(app, shared);
+    crate::tray::rebuild_menu(app, shared);
+    if telegram {
+        crate::telegram::on_reload(app, shared);
+    }
+    crate::settings::on_reload(app, shared);
 }
 
 // ---------------------------------------------------------------- interactive cards
@@ -567,7 +665,12 @@ fn start_interactive(
     let at_pc = active_ms == 0 || crate::win::idle_ms() < active_ms;
     // Only a phone channel that is on, ready and wants this kind of card changes the rules.
     let phone_hold = phone::configured(shared) && config::get_bool(&cfg, &format!("phone.events.{kind}"), true);
-    let focus_skip = !test && !phone_hold && at_pc && skip.iter().any(|s| s.eq_ignore_ascii_case(&fg));
+    // interactive.skipWhenActive off: the card always shows, whatever is in front.
+    let focus_skip = !test
+        && !phone_hold
+        && at_pc
+        && config::get_bool(&cfg, "interactive.skipWhenActive", true)
+        && skip.iter().any(|s| s.eq_ignore_ascii_case(&fg));
     if !remote && (!config::get_bool(&cfg, "interactive.enabled", true) || focus_skip) {
         // The Claude app / a terminal is in front: its own dialog is visible, answer there.
         util::log_line(&[&format!("{kind}-skip"), if fg.is_empty() { "disabled" } else { &fg }]);
@@ -641,6 +744,8 @@ fn start_interactive(
     let mut payload = json!({
         "id": id,
         "kind": kind,
+        // Cards only ever come from Claude Code.
+        "icon": icon(&cfg, true),
         "waitMs": wait_ms,
         "nowLabel": t.now,
         "sound": config::get_bool(&cfg, "sound", true),
@@ -1036,13 +1141,19 @@ fn summarize_limits(status: Option<&Value>) -> String {
 
 // ---------------------------------------------------------------- toast listener bridge
 
+/// The listener mirrors toasts and also reports the window in front, which
+/// interactive.skipWhenActive needs: it runs while either is on.
+fn listener_wanted(cfg: &Value) -> bool {
+    config::get_bool(cfg, "toasts.enabled", true) || config::get_bool(cfg, "interactive.skipWhenActive", true)
+}
+
 pub fn start_toast_listener(app: AppHandle, shared: Arc<Shared>) {
     std::thread::spawn(move || loop {
         if shared.quitting.load(Ordering::SeqCst) {
             return;
         }
         let cfg = shared.cfg();
-        if !config::get_bool(&cfg, "toasts.enabled", true) {
+        if !listener_wanted(&cfg) {
             *shared.listener_status.lock().unwrap() = "disabled".to_string();
             return;
         }
@@ -1101,6 +1212,23 @@ pub fn start_toast_listener(app: AppHandle, shared: Arc<Shared>) {
     });
 }
 
+/// toasts.enabled (or interactive.skipWhenActive) was switched on (settings window, Reload
+/// config) after the listener had stopped because both were off: start it now rather than at
+/// the next start of the overlay.
+fn resume_toast_listener(app: &AppHandle, shared: &Arc<Shared>) {
+    if !listener_wanted(&shared.cfg()) {
+        return;
+    }
+    {
+        let mut status = shared.listener_status.lock().unwrap();
+        if *status != "disabled" {
+            return;
+        }
+        *status = "starting".to_string();
+    }
+    start_toast_listener(app.clone(), shared.clone());
+}
+
 fn handle_listener_line(app: &AppHandle, shared: &Arc<Shared>, line: &str) {
     let Ok(msg) = serde_json::from_str::<Value>(line) else { return };
     match msg.get("event").and_then(Value::as_str).unwrap_or("") {
@@ -1114,7 +1242,8 @@ fn handle_listener_line(app: &AppHandle, shared: &Arc<Shared>, line: &str) {
             *shared.listener_status.lock().unwrap() =
                 if allowed { "allowed".to_string() } else { "denied".to_string() };
             util::log_line(&["listener-access", status]);
-            if !allowed {
+            // Running only for skipWhenActive: no mirrored toasts to miss, so no banner.
+            if !allowed && config::get_bool(&shared.cfg(), "toasts.enabled", true) {
                 let t = shared.t();
                 notify(app, shared, "HeadsUp", t.access_denied, t.access_denied_body, "permission", Some(12000));
             }
@@ -1130,6 +1259,11 @@ fn handle_listener_line(app: &AppHandle, shared: &Arc<Shared>, line: &str) {
 
 fn handle_toast(app: &AppHandle, shared: &Arc<Shared>, msg: &Value) {
     let cfg = shared.cfg();
+    // Switched off while the listener runs (it keeps running: it also reports the window in
+    // front for interactive.skipWhenFocused).
+    if !config::get_bool(&cfg, "toasts.enabled", true) {
+        return;
+    }
     let mut watch = config::get_str_list(&cfg, "toasts.watchApps");
     if watch.is_empty() {
         watch.push("Claude".to_string());
@@ -1161,6 +1295,7 @@ fn handle_toast(app: &AppHandle, shared: &Arc<Shared>, msg: &Value) {
     // the actual message / command). Chat and Cowork have no hooks, so their toast shows.
     let arrived = util::now_ms();
     let hold = config::get_u64(&cfg, "toasts.holdMs", 1500);
+    let from_claude = claude_app(&app_name, aumid);
     let app = app.clone();
     let shared = shared.clone();
     std::thread::spawn(move || {
@@ -1168,11 +1303,11 @@ fn handle_toast(app: &AppHandle, shared: &Arc<Shared>, msg: &Value) {
         if shared.last_hook_banner_ms.load(Ordering::SeqCst) >= arrived - 500 {
             return;
         }
-        show_toast_banner(&app, &shared, &app_name, &texts);
+        show_toast_banner(&app, &shared, &app_name, &texts, from_claude);
     });
 }
 
-fn show_toast_banner(app: &AppHandle, shared: &Arc<Shared>, app_name: &str, texts: &[String]) {
+fn show_toast_banner(app: &AppHandle, shared: &Arc<Shared>, app_name: &str, texts: &[String], from_claude: bool) {
     let t = shared.t();
     let head = texts.first().cloned().unwrap_or_default();
     let mut body = texts.iter().skip(1).cloned().collect::<Vec<_>>().join(" · ");
@@ -1195,7 +1330,7 @@ fn show_toast_banner(app: &AppHandle, shared: &Arc<Shared>, app_name: &str, text
     };
     let subtitle = if head.is_empty() { label.to_string() } else { format!("{label} · {head}") };
     let title = if app_name.is_empty() { t.app_name } else { app_name };
-    notify(app, shared, title, &subtitle, &body, kind, None);
+    banner(app, shared, from_claude, title, &subtitle, &body, kind, None);
     let (subtitle, body) = (mask::secrets(&subtitle), mask::secrets(&body));
     phone::push(shared, PhoneMsg { urgent: false, kind: "stop", text: format!("💬 {title} · {subtitle}\n{body}"), html: Some(format!("💬 <b>{}</b> · {}\n{}", phone::esc(title), phone::esc(&subtitle), phone::esc(&body))), buttons: vec![], pending_id: None });
 }
@@ -1215,33 +1350,57 @@ fn set_capture(app: &AppHandle, shared: &Shared, flag: bool) {
     }
 }
 
-/// While interactive cards are on screen, poll the cursor and lift the click-through only
-/// over the cards. No OS-level mouse hook involved.
+/// While interactive cards (or a limit-reset logo that waits for a click on it) are on
+/// screen, poll the cursor and lift the click-through only over them. No OS-level mouse hook
+/// involved; a logo that waits for a click anywhere is served by polling the mouse buttons.
 pub fn start_cursor_poll(app: AppHandle, shared: Arc<Shared>) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(40));
-        if shared.quitting.load(Ordering::SeqCst) {
-            return;
+    std::thread::spawn(move || {
+        let mut clicks = crate::win::ClickWatch::default();
+        loop {
+            std::thread::sleep(Duration::from_millis(40));
+            if shared.quitting.load(Ordering::SeqCst) {
+                return;
+            }
+            poll_logo_click(&app, &shared, &mut clicks);
+            let rects = shared.hot_rects.lock().unwrap().clone();
+            if rects.is_empty() {
+                set_capture(&app, &shared, false);
+                continue;
+            }
+            let Some(win) = window(&app) else { continue };
+            if !shared.typing.load(Ordering::SeqCst) {
+                crate::win::ensure_noactivate(&win);
+            }
+            let (Ok(cur), Ok(pos), Ok(scale)) = (app.cursor_position(), win.outer_position(), win.scale_factor()) else {
+                continue;
+            };
+            let x = (cur.x - pos.x as f64) / scale;
+            let y = (cur.y - pos.y as f64) / scale;
+            let inside = rects
+                .iter()
+                .any(|r| x >= r.left - 4.0 && x <= r.right + 4.0 && y >= r.top - 4.0 && y <= r.bottom + 4.0);
+            set_capture(&app, &shared, inside);
         }
-        let rects = shared.hot_rects.lock().unwrap().clone();
-        if rects.is_empty() {
-            set_capture(&app, &shared, false);
-            continue;
-        }
-        let Some(win) = window(&app) else { continue };
-        if !shared.typing.load(Ordering::SeqCst) {
-            crate::win::ensure_noactivate(&win);
-        }
-        let (Ok(cur), Ok(pos), Ok(scale)) = (app.cursor_position(), win.outer_position(), win.scale_factor()) else {
-            continue;
-        };
-        let x = (cur.x - pos.x as f64) / scale;
-        let y = (cur.y - pos.y as f64) / scale;
-        let inside = rects
-            .iter()
-            .any(|r| x >= r.left - 4.0 && x <= r.right + 4.0 && y >= r.top - 4.0 && y <= r.bottom + 4.0);
-        set_capture(&app, &shared, inside);
     });
+}
+
+/// logo.dismiss "anyClick": the overlay is click-through, so a click anywhere on the screen
+/// (any mouse button) is seen here, as a button going down, and the page is told to hide the
+/// logo. Clicks within the guard time after the logo appeared do not count.
+fn poll_logo_click(app: &AppHandle, shared: &Shared, clicks: &mut crate::win::ClickWatch) {
+    if !shared.logo_any_click.load(Ordering::SeqCst) {
+        return;
+    }
+    // Polled during the guard time too, so a press made (or still held) then is not reported
+    // once it is over.
+    let clicked = clicks.poll();
+    if clicked
+        && util::now_ms() >= shared.logo_armed_at.load(Ordering::SeqCst)
+        && shared.logo_any_click.swap(false, Ordering::SeqCst)
+    {
+        util::log_line(&["logo", "dismissed-by-click"]);
+        emit_page(app, shared, "logo-dismiss", json!({}));
+    }
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -1344,5 +1503,23 @@ mod tests {
             CARD_TEXT_PC,
         );
         assert_eq!(t, "mcp__github__create_or_update_file\nbranch: main\ncontent: x⏎y\nn: 3\npath: README.md");
+    }
+
+    #[test]
+    fn claude_logo_only_for_claude_sources() {
+        assert!(from_claude_code(&json!({"cwd": "C:/p"})));
+        assert!(from_claude_code(&json!({"agent": "Claude"})));
+        assert!(!from_claude_code(&json!({"agent": "codex", "title": "Codex"})));
+        assert!(claude_app("Claude", ""));
+        assert!(claude_app("", "Claude_pzs8sxrjxfjjc!Claude"));
+        assert!(claude_app("", "com.squirrel.AnthropicClaude.claude"));
+        assert!(!claude_app("Claude Helper", "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"));
+        assert!(!claude_app("Codex", ""));
+        let claude = json!({"logo": {"style": "claude"}});
+        let headsup = json!({"logo": {"style": "headsup"}});
+        assert_eq!(icon(&claude, true), "claude");
+        assert_eq!(icon(&claude, false), "headsup");
+        assert_eq!(icon(&headsup, true), "headsup");
+        assert_eq!(icon(&json!({}), true), "headsup");
     }
 }

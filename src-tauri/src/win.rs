@@ -1,5 +1,5 @@
 //! Small Win32 helpers: never-activating window style, a message box for CLI mode, process
-//! liveness and token elevation.
+//! liveness, token elevation, mouse clicks anywhere on the screen and the double-click time.
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -9,7 +9,10 @@ use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetTick
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, GetDoubleClickTime, GetLastInputInfo, LASTINPUTINFO, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+    VK_XBUTTON1, VK_XBUTTON2,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowLongPtrW, MessageBoxW, SetForegroundWindow, SetWindowLongPtrW,
     GWL_EXSTYLE, MB_ICONINFORMATION, MB_OK, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -68,6 +71,34 @@ pub fn idle_ms() -> u64 {
         }
         GetTickCount().wrapping_sub(info.dwTime) as u64
     }
+}
+
+/// Mouse clicks anywhere on the screen, seen by polling the physical button state (no hook):
+/// `poll` is true when any button went down since the last poll. A press already held at the
+/// first poll counts too, so the caller ignores what it reports for a moment after starting.
+#[derive(Default)]
+pub struct ClickWatch {
+    down: bool,
+}
+
+impl ClickWatch {
+    pub fn poll(&mut self) -> bool {
+        let (mut down, mut tapped) = (false, false);
+        for vk in [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2] {
+            let state = unsafe { GetAsyncKeyState(vk as i32) } as u16;
+            down |= state & 0x8000 != 0;
+            // Pressed since the last call: catches a click shorter than the poll interval.
+            tapped |= state & 1 != 0;
+        }
+        let clicked = !self.down && (down || tapped);
+        self.down = down;
+        clicked
+    }
+}
+
+/// The user's double-click time (Mouse settings), in ms, kept within sane bounds.
+pub fn double_click_ms() -> i64 {
+    (unsafe { GetDoubleClickTime() } as i64).clamp(200, 900)
 }
 
 pub fn message_box(title: &str, text: &str) {

@@ -283,6 +283,15 @@ pub fn tail_id(id: &str) -> String {
     format!("…{}", chars[chars.len() - keep..].iter().collect::<String>())
 }
 
+/// Held around every read-change-write of config.json (settings window, Telegram pairing,
+/// remote switch, installer), so one writer never overwrites another's change with a stale
+/// copy. Only around the read and the write: it is not reentrant.
+static CONFIG_WRITE: Mutex<()> = Mutex::new(());
+
+pub fn lock_config() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_WRITE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn read_json(path: &Path) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()

@@ -7,6 +7,8 @@
     "showLastMessage": true
   },
   "logo": {
+    "style": "headsup",
+    "dismiss": "anyClick",
     "durationMs": 9000
   },
   "events": {
@@ -30,6 +32,7 @@
   "interactive": {
     "enabled": true,
     "waitMs": 20000,
+    "skipWhenActive": true,
     "skipOnlyIfActiveMs": 30000,
     "skipWhenFocused": ["claude", "WindowsTerminal", "Code", "cursor", "windsurf", "pwsh", "powershell", "cmd", "conhost", "wezterm-gui", "alacritty", "mintty", "idea64", "webstorm64"]
   },
