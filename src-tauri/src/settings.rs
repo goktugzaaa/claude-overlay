@@ -26,6 +26,8 @@ enum Kind {
     Topic,
     /// A token: set (non-empty) or cleared (empty), never read back.
     Secret,
+    /// A keyboard shortcut (hotkey::parse); empty turns it off.
+    Hotkey,
 }
 
 const MAX_APPS: usize = 20;
@@ -57,6 +59,7 @@ const SETTINGS: &[(&str, Kind)] = &[
     ("interactive.enabled", Kind::Bool),
     ("interactive.waitMs", Kind::Int(10_000, 120_000)),
     ("interactive.skipWhenActive", Kind::Bool),
+    ("hotkeys.hide", Kind::Hotkey),
     ("phone.enabled", Kind::Bool),
     ("phone.onlyWhenIdleMs", Kind::Int(0, 3_600_000)),
     ("phone.events.stop", Kind::Bool),
@@ -152,6 +155,7 @@ fn describe(kind: Kind) -> Value {
         Kind::Url => json!({"type": "url", "maxChars": MAX_TEXT_CHARS}),
         Kind::Topic => json!({"type": "topic", "maxChars": 64}),
         Kind::Secret => json!({"type": "secret"}),
+        Kind::Hotkey => json!({"type": "hotkey"}),
     }
 }
 
@@ -174,7 +178,7 @@ fn current(cfg: &Value, defaults: &Value, key: &str, kind: Kind) -> Value {
             })
         }
         Kind::Apps => json!(config::get_str_list(cfg, key)),
-        Kind::Url | Kind::Topic => json!(config::get_str(cfg, key).unwrap_or_default()),
+        Kind::Url | Kind::Topic | Kind::Hotkey => json!(config::get_str(cfg, key).unwrap_or_default()),
         Kind::Secret => Value::Null,
     }
 }
@@ -205,6 +209,8 @@ pub fn get(shared: &Shared) -> Value {
         "schema": schema,
         "telegram": {"tokenSet": tg.is_some(), "paired": tg.is_some_and(|c| !c.chat_id.is_empty())},
         "ntfy": {"tokenSet": secret_set(&cfg, "phone.ntfy.token")},
+        // Whether hotkeys.hide is registered (another app may own the same shortcut).
+        "hotkey": crate::hotkey::status_json(),
         "codex": installer::codex_installed(),
         "startup": installer::startup_enabled(),
     })
@@ -277,6 +283,12 @@ fn check(key: &str, kind: Kind, value: &Value) -> Result<Value, String> {
             }
             Some(s) if s.len() <= 256 && plain(s) => Ok(json!(s)),
             _ => refuse("expected a token without spaces".into()),
+        },
+        // Written in its canonical spelling ("ctrl+shift+h" -> "Ctrl+Shift+H").
+        Kind::Hotkey => match value.as_str().map(crate::hotkey::parse) {
+            Some(Ok(k)) => Ok(json!(k.map(|k| k.name).unwrap_or_default())),
+            Some(Err(why)) => refuse(why),
+            None => refuse("expected a shortcut such as Ctrl+Shift+H, or nothing".into()),
         },
     }
 }
@@ -430,6 +442,10 @@ mod tests {
         // Canonical spelling only.
         assert!(ok(json!({"logo.dismiss": "logoclick"})).is_err());
         assert!(ok(json!({"remote.permissionMode": "bypassPermissions"})).is_err());
+        assert_eq!(ok(json!({"hotkeys.hide": " ctrl+alt+f9 "})).unwrap(), vec![("hotkeys.hide".to_string(), json!("Ctrl+Alt+F9"))]);
+        assert_eq!(ok(json!({"hotkeys.hide": ""})).unwrap(), vec![("hotkeys.hide".to_string(), json!(""))]);
+        assert!(ok(json!({"hotkeys.hide": "H"})).is_err());
+        assert!(ok(json!({"hotkeys.hide": false})).is_err());
         // Never writable, unknown, empty, or one bad key spoiling the patch.
         for p in [
             json!({"port": 1}),

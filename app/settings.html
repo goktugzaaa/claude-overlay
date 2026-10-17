@@ -155,6 +155,8 @@
   .status { display: inline-flex; align-items: center; gap: 8px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-2); flex: none; }
   .dot.on { background: var(--green); }
+  .status.warn { color: var(--red); }
+  .status.warn .dot { background: var(--red); }
 
   footer { margin-top: 26px; color: var(--ink-2); font-size: 12.5px; }
   footer .links { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
@@ -264,6 +266,18 @@
       'interactive.skipWhenActive': 'Skip it while I am at the terminal or in Claude',
       'interactive.skipWhenActive.help': 'No card while you are typing in a terminal, an editor or the Claude window: its own dialog is right in front of you. With the phone set up, cards always show.',
 
+      keyboard: 'Keyboard',
+      'hotkeys.hide': 'Hide everything',
+      'hotkeys.hide.help': 'One shortcut hides every banner, card and the limit logo, from any app (games too); the × on each closes just that one. A hidden card waits for your answer on the phone when a Telegram chat is paired; otherwise Claude Code shows its own dialog. Type a shortcut, or press it in the field. Empty = off.',
+      hotkey_placeholder: 'Ctrl+Alt+F9',
+      hotkey_bad: 'Use Ctrl, Alt or Win with one key, such as Ctrl+Alt+F9 or Ctrl+Shift+H (F13 to F24 also work alone).',
+      hotkey_altgr: 'Ctrl+Alt with a letter or digit is AltGr on many keyboards (it types @, { or [). Add Win, or use an F key such as Ctrl+Alt+F9.',
+      hotkey_reserved: 'Windows already uses this shortcut (Alt+F4, Alt+Tab, Alt+Esc, Alt+Space, Alt+Enter, Ctrl+Esc). Pick another one.',
+      'hotkey.on': 'Active: {key}', 'hotkey.off': 'Off',
+      'hotkey.taken': 'Another app already uses {key}. Pick another shortcut.',
+      'hotkey.failed': 'Windows did not accept {key}. Pick another shortcut.',
+      'hotkey.invalid': 'The shortcut in config.json is not one HeadsUp understands ({key}).',
+
       phone: 'Phone',
       'phone.enabled': 'Send to the phone', 'phone.enabled.help': 'Banners, questions and permission requests on your phone, through Telegram or ntfy.',
       'phone.onlyWhenIdleMs': 'Only when I am away for', 'phone.onlyWhenIdleMs.help': 'Minutes without mouse or keyboard input before anything is sent (0 = always, up to 60).',
@@ -348,6 +362,18 @@
       'interactive.skipWhenActive': 'Terminalde ya da Claude\'dayken kart gösterme',
       'interactive.skipWhenActive.help': 'Bir terminalde, editörde ya da Claude penceresinde yazarken kart çıkmaz: kendi penceresi zaten önünde. Telefon ayarlıysa kartlar her zaman çıkar.',
 
+      keyboard: 'Klavye',
+      'hotkeys.hide': 'Hepsini gizle',
+      'hotkeys.hide.help': 'Tek bir kısayol tüm bildirimleri, kartları ve limit logosunu her uygulamada (oyunlarda da) gizler; her birinin üstündeki × yalnızca onu kapatır. Telegram sohbeti eşleşmişse gizlenen kart telefonda cevabını bekler; değilse Claude Code kendi penceresini gösterir. Kısayolu yaz ya da alanın içinde tuşlarına bas. Boş = kapalı.',
+      hotkey_placeholder: 'Ctrl+Alt+F9',
+      hotkey_bad: 'Ctrl, Alt ya da Win ile tek bir tuş kullan: Ctrl+Alt+F9 ya da Ctrl+Shift+H gibi (F13-F24 tek başına da olur).',
+      hotkey_altgr: 'Harf ya da rakamla Ctrl+Alt birçok klavyede AltGr demek (@, { ya da [ yazar). Win ekle ya da Ctrl+Alt+F9 gibi bir F tuşu kullan.',
+      hotkey_reserved: 'Bu kısayolu Windows kullanıyor (Alt+F4, Alt+Tab, Alt+Esc, Alt+Space, Alt+Enter, Ctrl+Esc). Başka bir kısayol seç.',
+      'hotkey.on': 'Etkin: {key}', 'hotkey.off': 'Kapalı',
+      'hotkey.taken': '{key} kısayolunu başka bir uygulama kullanıyor. Başka bir kısayol seç.',
+      'hotkey.failed': 'Windows {key} kısayolunu kabul etmedi. Başka bir kısayol seç.',
+      'hotkey.invalid': 'config.json\'daki kısayol HeadsUp\'ın anladığı bir kısayol değil ({key}).',
+
       phone: 'Telefon',
       'phone.enabled': 'Telefona gönder', 'phone.enabled.help': 'Bildirimler, sorular ve izin istekleri telefonunda, Telegram ya da ntfy ile.',
       'phone.onlyWhenIdleMs': 'Yalnızca şu kadar uzaktaysam', 'phone.onlyWhenIdleMs.help': 'Bir şey gönderilmeden önce fare ve klavyenin kullanılmadığı dakika (0 = her zaman, en fazla 60).',
@@ -424,6 +450,9 @@
       { key: 'interactive.enabled', type: 'switch' },
       { key: 'interactive.waitMs', type: 'number', unit: 's', when: (s) => s.values['interactive.enabled'] },
       { key: 'interactive.skipWhenActive', type: 'switch', when: (s) => s.values['interactive.enabled'] },
+    ] },
+    { id: 'keyboard', rows: [
+      { key: 'hotkeys.hide', type: 'hotkey' },
     ] },
     { id: 'phone', rows: [
       { key: 'phone.enabled', type: 'switch' },
@@ -562,6 +591,29 @@
       row.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
       row.input.addEventListener('input', () => clearError(row));
       row.clearBtn.addEventListener('click', () => commit(row, { [def.key]: '' }, () => { row.input.value = ''; }));
+    } else if (type === 'hotkey') {
+      row.input = el('input', { type: 'text', id, class: 'wide', spellcheck: 'false', autocomplete: 'off', 'data-tp': 'hotkey_placeholder' });
+      row.clearBtn = el('button', { type: 'button', class: 'btn', t: 'clear' });
+      row.dot = el('span', { class: 'dot' });
+      row.statusText = el('span', {});
+      row.status = el('p', { class: 'help status', 'aria-live': 'polite' }, row.dot, row.statusText);
+      const text = textCol(row, row.name, id, def.noHelp);
+      text.insertBefore(row.status, row.err);
+      row.el = el('div', { class: 'row stack' }, text, el('div', { class: 'ctl' }, row.input, row.clearBtn, savedTick(row)));
+      // A shortcut pressed in the field is written down and saved (see `recorded`). Registered
+      // before bindText, so Enter in such a shortcut does not also send what was typed.
+      row.input.addEventListener('keydown', (e) => {
+        const s = recorded(e);
+        if (!s) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        row.input.value = s;
+        row.dirty = true;
+        clearError(row);
+        row.input.dispatchEvent(new Event('change'));
+      });
+      bindText(row, () => checkHotkey(def, row.input.value));
+      row.clearBtn.addEventListener('click', () => { row.dirty = false; commit(row, { [def.key]: '' }); });
     } else if (type === 'pairing') {
       row.dot = el('span', { class: 'dot' });
       row.statusText = el('span', {});
@@ -625,6 +677,76 @@
     return { patch: { [def.key]: v } };
   }
 
+  // Keyboard shortcuts, by the host's rules (hotkey.rs): Ctrl, Alt, Shift and Win at most once,
+  // one key, and Ctrl, Alt or Win unless the key is F13-F24; Ctrl+Alt with a letter or digit
+  // (AltGr) needs Win, and shortcuts Windows uses are refused. The host saves its own spelling.
+  const FKEY = /^f([1-9]|1\d|2[0-4])$/;
+  const FKEY13 = /^f(1[3-9]|2[0-4])$/;
+  // hotkey.rs `reserved`: Alt+F4, Alt+Tab, Alt+Esc, Alt+Space, Alt+Enter, Ctrl+Esc, Ctrl+Shift+Esc
+  // (Tab and Esc with or without Shift). `key` lower case.
+  function reservedHotkey(mods, key) {
+    if (mods.has('win')) return false;
+    const k = { return: 'enter', escape: 'esc' }[key] || key;
+    const alt = mods.has('alt'), ctrl = mods.has('ctrl');
+    if (k === 'tab') return alt && !ctrl;
+    if (k === 'esc') return alt !== ctrl;
+    if (k === 'f4' || k === 'space' || k === 'enter') return alt && !ctrl && !mods.has('shift');
+    return false;
+  }
+  const NAMED_KEYS = ['space', 'enter', 'return', 'tab', 'esc', 'escape', 'backspace', 'insert', 'ins', 'delete', 'del',
+    'home', 'end', 'pageup', 'pgup', 'pagedown', 'pgdn', 'up', 'down', 'left', 'right', 'pause'];
+  const MODS = { ctrl: 'ctrl', control: 'ctrl', alt: 'alt', shift: 'shift', win: 'win', windows: 'win' };
+  function checkHotkey(def, raw) {
+    const v = raw.trim();
+    if (!v) return { patch: { [def.key]: '' } };
+    const bad = { error: t('hotkey_bad') };
+    const mods = new Set();
+    let key = null;
+    for (const part of v.split('+').map((x) => x.trim().toLowerCase())) {
+      if (MODS[part]) {
+        if (mods.has(MODS[part])) return bad;
+        mods.add(MODS[part]);
+        continue;
+      }
+      const known = /^[a-z0-9]$/.test(part) || FKEY.test(part) || /^(num|numpad)\d$/.test(part) || NAMED_KEYS.includes(part);
+      if (!known || key) return bad;
+      key = part;
+    }
+    if (!key || (!FKEY13.test(key) && !mods.has('ctrl') && !mods.has('alt') && !mods.has('win'))) return bad;
+    if (/^[a-z0-9]$/.test(key) && mods.has('ctrl') && mods.has('alt') && !mods.has('win')) return { error: t('hotkey_altgr') };
+    if (reservedHotkey(mods, key)) return { error: t('hotkey_reserved') };
+    return { patch: { [def.key]: v } };
+  }
+  // The name of the key pressed, in the host's spelling: a letter or digit as the keyboard
+  // layout types it, anything else by its position.
+  function keyName(e) {
+    const c = e.code || '';
+    let m;
+    if ((m = /^Numpad(\d)$/.exec(c))) return 'Num' + m[1];
+    if (/^[a-z0-9]$/i.test(e.key || '')) return e.key.toUpperCase();
+    if ((m = /^Key([A-Z])$/.exec(c))) return m[1];
+    if ((m = /^Digit(\d)$/.exec(c))) return m[1];
+    if (FKEY.test(c.toLowerCase())) return c;
+    const named = { Space: 'Space', Enter: 'Enter', NumpadEnter: 'Enter', Backspace: 'Backspace', Insert: 'Insert',
+      Delete: 'Delete', Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown', ArrowUp: 'Up',
+      ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', Pause: 'Pause' };
+    return named[c] || null;
+  }
+  // A shortcut pressed in the hotkey field, or null for keys that stay with the field: typing,
+  // Shift with a key, Ctrl with one key (Ctrl+C, Ctrl+V, ...), F1-F12 alone or with Shift, Tab,
+  // Esc, and shortcuts Windows uses (Alt+F4 still closes the window).
+  function recorded(e) {
+    const k = keyName(e);
+    if (!k) return null;
+    const lower = k.toLowerCase();
+    if (FKEY.test(lower)) {
+      if (!(FKEY13.test(lower) || e.ctrlKey || e.altKey || e.metaKey)) return null;
+    } else if (!(e.altKey || e.metaKey || (e.ctrlKey && e.shiftKey))) return null;
+    const mods = new Set([e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'win'].filter(Boolean));
+    if (reservedHotkey(mods, lower)) return null;
+    return [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Win', k].filter(Boolean).join('+');
+  }
+
   function build() {
     const main = document.getElementById('main');
     for (const sec of SECTIONS) {
@@ -669,7 +791,7 @@
         else if (def.type === 'choice') for (const r of row.radios) r.checked = r.value === v[def.key];
         else if (def.type === 'number') row.input.value = String(+(v[def.key] / UNITS[def.unit]).toFixed(2));
         else if (def.type === 'apps') row.input.value = (v[def.key] || []).join(', ');
-        else if (def.type === 'text') row.input.value = v[def.key] || '';
+        else if (def.type === 'text' || def.type === 'hotkey') row.input.value = v[def.key] || '';
       }
       let on = def.when ? !!def.when(st) : true;
       if (def.section.lockedUnless && !def.section.lockedUnless(st)) on = false;
@@ -679,6 +801,15 @@
         row.chip.classList.toggle('on', set);
         row.clearBtn.disabled = !set;
       }
+      if (def.type === 'hotkey') {
+        // Whether the shortcut works: off, active, or why Windows did not take it.
+        const hk = st.hotkey || { state: 'off', key: '' };
+        const state = ['on', 'off', 'taken', 'failed', 'invalid'].includes(hk.state) ? hk.state : 'off';
+        row.dot.classList.toggle('on', state === 'on');
+        row.status.classList.toggle('warn', state !== 'on' && state !== 'off');
+        row.statusText.textContent = t('hotkey.' + state, { key: hk.key || '' });
+        row.clearBtn.disabled = !v[def.key];
+      }
       if (def.type === 'pairing') {
         const tg = st.telegram;
         row.dot.classList.toggle('on', tg.paired);
@@ -687,7 +818,7 @@
       }
       row.el.classList.toggle('off', !on);
       for (const c of row.el.querySelectorAll('input, button')) {
-        if (def.type === 'secret' && c === row.clearBtn) { if (!on) c.disabled = true; continue; }
+        if ((def.type === 'secret' || def.type === 'hotkey') && c === row.clearBtn) { if (!on) c.disabled = true; continue; }
         if (def.type === 'pairing' && c === row.btn) continue;
         c.disabled = !on;
       }

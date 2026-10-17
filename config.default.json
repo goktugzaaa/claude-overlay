@@ -36,6 +36,9 @@
     "skipOnlyIfActiveMs": 30000,
     "skipWhenFocused": ["claude", "WindowsTerminal", "Code", "cursor", "windsurf", "pwsh", "powershell", "cmd", "conhost", "wezterm-gui", "alacritty", "mintty", "idea64", "webstorm64"]
   },
+  "hotkeys": {
+    "hide": "Ctrl+Alt+F9"
+  },
   "phone": {
     "enabled": true,
     "onlyWhenIdleMs": 180000,

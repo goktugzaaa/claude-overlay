@@ -54,6 +54,12 @@ pub struct Strings {
     pub other: &'static str,
     pub send: &'static str,
     pub type_placeholder: &'static str,
+    /// On a question card whose earlier questions were answered on the phone.
+    pub answered_on_phone: &'static str,
+    /// The × on banners, cards and the limit-reset logo.
+    pub close: &'static str,
+    /// Added to that button's tooltip while the hide hotkey works; "{key}" is the shortcut.
+    pub hide_all_key: &'static str,
     pub codex_enabled: &'static str,
     pub codex_enabled_body: &'static str,
     pub codex_disabled: &'static str,
@@ -124,6 +130,9 @@ pub static EN: Strings = Strings {
     other: "Other…",
     send: "Send",
     type_placeholder: "Type your answer",
+    answered_on_phone: "Answered on the phone",
+    close: "Close",
+    hide_all_key: "{key} hides everything",
     codex_enabled: "Codex CLI connected",
     codex_enabled_body: "Task-finished banners for Codex are on (~/.codex/config.toml).",
     codex_disabled: "Codex CLI disconnected",
@@ -205,6 +214,9 @@ pub static TR: Strings = Strings {
     other: "Başka…",
     send: "Gönder",
     type_placeholder: "Cevabını yaz",
+    answered_on_phone: "Telefonda cevaplandı",
+    close: "Kapat",
+    hide_all_key: "{key} hepsini gizler",
     codex_enabled: "Codex CLI bağlandı",
     codex_enabled_body: "Codex için görev bitti bildirimleri açık (~/.codex/config.toml).",
     codex_disabled: "Codex CLI bağlantısı kaldırıldı",

@@ -190,6 +190,7 @@ fn banner(
             "kind": kind,
             "icon": icon(&cfg, from_claude),
             "nowLabel": t.now,
+            "closeLabel": close_label(shared),
             "durationMs": dur,
             "sound": config::get_bool(&cfg, "sound", true),
         }),
@@ -218,8 +219,18 @@ pub fn show_logo(app: &AppHandle, shared: &Shared, caption: &str) {
             },
             "durationMs": config::get_u64(&cfg, "logo.durationMs", 9000),
             "sound": config::get_bool(&cfg, "sound", true),
+            "closeLabel": close_label(shared),
         }),
     );
+}
+
+/// Tooltip of the × on banners, cards and the logo; it names the hide hotkey while that works.
+fn close_label(shared: &Shared) -> String {
+    let t = shared.t();
+    match crate::hotkey::active() {
+        Some(key) => format!("{} · {}", t.close, t.hide_all_key.replace("{key}", &key)),
+        None => t.close.to_string(),
+    }
 }
 
 /// A click anywhere must not dismiss the logo in its first moments: it may be one that was
@@ -620,6 +631,7 @@ pub fn reload(app: &AppHandle, shared: &Arc<Shared>, telegram: bool) {
     // only learns the look (logo.style).
     send_style(app, shared);
     resume_toast_listener(app, shared);
+    crate::hotkey::reload();
     crate::tray::rebuild_menu(app, shared);
     if telegram {
         crate::telegram::on_reload(app, shared);
@@ -691,7 +703,17 @@ fn start_interactive(
     let id = (shared.seq.fetch_add(1, Ordering::SeqCst) + 1).to_string();
     shared.pending.lock().unwrap().insert(
         id.clone(),
-        Pending { req, kind: kind.to_string(), event: event.clone(), deadline_ms: util::now_ms() + wait_ms as i64, via_permission, partial: serde_json::Map::new() },
+        Pending {
+            req,
+            kind: kind.to_string(),
+            event: event.clone(),
+            deadline_ms: util::now_ms() + wait_ms as i64,
+            via_permission,
+            partial: serde_json::Map::new(),
+            phone_wait: None,
+            on_phone: false,
+            dismissed: false,
+        },
     );
     shared.last_hook_banner_ms.store(util::now_ms(), Ordering::SeqCst);
     if kind == "permission" {
@@ -748,9 +770,10 @@ fn start_interactive(
         "icon": icon(&cfg, true),
         "waitMs": wait_ms,
         "nowLabel": t.now,
+        "closeLabel": close_label(shared),
         "sound": config::get_bool(&cfg, "sound", true),
         "labels": {"allow": t.allow, "deny": t.deny, "answerInApp": t.answer_in_app, "answered": t.answered, "ok": "OK",
-                   "other": t.other, "send": t.send, "typePlaceholder": t.type_placeholder},
+                   "other": t.other, "send": t.send, "typePlaceholder": t.type_placeholder, "answeredOnPhone": t.answered_on_phone},
         "title": t.code_name,
     });
     if kind == "question" {
@@ -800,7 +823,7 @@ fn start_interactive(
             return;
         }
         let subtitle = with_project(t.question, event.get("cwd"));
-        let (text, html, buttons) = phone_question(shared, &id, &event, 0).unwrap_or_default();
+        let (text, html, buttons) = phone_question(shared, &id, &event, 0, &serde_json::Map::new()).unwrap_or_default();
         payload["subtitle"] = json!(subtitle);
         payload["questions"] = Value::Array(questions);
         emit(app, shared, "interactive", payload);
@@ -827,29 +850,84 @@ fn start_interactive(
     }
 }
 
-/// Phone message for question `qi` of a question card: (plain text, Telegram HTML, buttons).
-/// Multi-question cards go to the phone one question at a time.
-pub fn phone_question(shared: &Shared, id: &str, event: &Value, qi: usize) -> Option<(String, String, Vec<Vec<(String, String)>>)> {
+/// Longest answer shown on an "answered" line of a phone question.
+const ANSWER_SHOWN: usize = 80;
+
+/// "2/3 ✓ answer" for question `qi` of `total` answered on the phone: one line, secrets
+/// masked, a long answer cut. Plain text: escape it for Telegram HTML.
+pub fn answered_text(qi: usize, total: usize, answer: &str) -> String {
+    let one = mask::secrets(answer).split_whitespace().collect::<Vec<_>>().join(" ");
+    let shown = if one.chars().count() > ANSWER_SHOWN { format!("{}…", util::truncate(&one, ANSWER_SHOWN - 1)) } else { one };
+    if total > 1 {
+        format!("{}/{total} ✓ {shown}", qi + 1)
+    } else {
+        format!("✓ {shown}")
+    }
+}
+
+/// An "answered" line for every question of `qs` with an answer in `done` (question text ->
+/// answer), in question order.
+fn answered_lines(qs: &[Value], done: &serde_json::Map<String, Value>) -> Vec<String> {
+    qs.iter()
+        .enumerate()
+        .filter_map(|(i, q)| {
+            let answer = done.get(q.get("question").and_then(Value::as_str)?)?.as_str()?;
+            Some(answered_text(i, qs.len(), answer))
+        })
+        .collect()
+}
+
+/// Title line of question `qi`'s phone message ("❓ Claude Code · project · Asking a
+/// question · 2/3"), as (plain text, HTML).
+fn question_title(shared: &Shared, event: &Value, total: usize, qi: usize) -> (String, String) {
     let t = shared.t();
-    let qs = event.pointer("/tool_input/questions").and_then(Value::as_array)?;
-    let total = qs.len();
-    let q = qs.get(qi)?;
     let project = util::project_name(event.get("cwd"));
-    // Raw text is cut before escaping, so the message stays far below Telegram's limit.
+    let progress = if total > 1 { format!(" · {}/{}", qi + 1, total) } else { String::new() };
+    (
+        format!("❓ {} · {}{progress}\n", t.code_name, t.question),
+        format!("❓ {} · {}{progress}\n", phone::head(t.code_name, &project), phone::esc(t.question)),
+    )
+}
+
+/// A question's header and text for the phone, as (plain text, HTML). Raw text is cut
+/// before escaping, so the message stays far below Telegram's limit.
+fn question_body(q: &Value) -> (String, String) {
     let question = cut(&mask::secrets(&util::clean_message(q.get("question").and_then(Value::as_str).unwrap_or(""))), 1500);
     let header = cut(&mask::secrets(q.get("header").and_then(Value::as_str).unwrap_or("")), 100);
-    // Multi-select: options are ticked one by one and sent with Done.
-    let multi = q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false);
-    let ticked = if multi { crate::telegram::multi_selected(id, qi) } else { Vec::new() };
-    let progress = if total > 1 { format!(" · {}/{}", qi + 1, total) } else { String::new() };
-    let mut text = format!("❓ {} · {}{progress}\n", t.code_name, t.question);
-    let mut html = format!("❓ {} · {}{progress}\n", phone::head(t.code_name, &project), phone::esc(t.question));
+    let mut html = String::new();
     if !header.is_empty() {
         html.push_str(&format!("<b>{}</b>\n", phone::esc(&header)));
     }
-    text.push_str(&question);
-    text.push('\n');
     html.push_str(&format!("{}\n", phone::esc(&question)));
+    (format!("{question}\n"), html)
+}
+
+/// Phone message for question `qi` of a question card: (plain text, Telegram HTML, buttons).
+/// Multi-question cards go to the phone one question at a time; the answers recorded so far
+/// (`done`: question text -> answer) are listed above the question.
+pub fn phone_question(
+    shared: &Shared,
+    id: &str,
+    event: &Value,
+    qi: usize,
+    done: &serde_json::Map<String, Value>,
+) -> Option<(String, String, Vec<Vec<(String, String)>>)> {
+    let t = shared.t();
+    let qs = event.pointer("/tool_input/questions").and_then(Value::as_array)?;
+    let q = qs.get(qi)?;
+    let (mut text, mut html) = question_title(shared, event, qs.len(), qi);
+    let lines = answered_lines(qs, done);
+    if !lines.is_empty() {
+        let lines = lines.join("\n");
+        text.push_str(&format!("{lines}\n\n"));
+        html.push_str(&format!("{}\n\n", phone::esc_raw(&lines)));
+    }
+    let (body_text, body_html) = question_body(q);
+    text.push_str(&body_text);
+    html.push_str(&body_html);
+    // Multi-select: options are ticked one by one and sent with Done.
+    let multi = q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false);
+    let ticked = if multi { crate::telegram::multi_selected(id, qi) } else { Vec::new() };
     let mut buttons = Vec::new();
     if let Some(os) = q.get("options").and_then(Value::as_array) {
         for (i, o) in os.iter().enumerate() {
@@ -883,10 +961,42 @@ pub fn phone_question(shared: &Shared, id: &str, event: &Value, qi: usize) -> Op
     Some((text, html, buttons))
 }
 
+/// Question `qi` once it is answered on the phone, for the message that asked it: the
+/// question with the recorded answer under it and no options (Telegram HTML).
+pub fn phone_question_answered(shared: &Shared, event: &Value, qi: usize, answer: &str) -> Option<String> {
+    let qs = event.pointer("/tool_input/questions").and_then(Value::as_array)?;
+    let q = qs.get(qi)?;
+    let (_, mut html) = question_title(shared, event, qs.len(), qi);
+    html.push_str(&question_body(q).1);
+    html.push_str(&format!("<b>{}</b>", phone::esc_raw(&answered_text(qi, qs.len(), answer))));
+    Some(html)
+}
+
+/// The phone recorded answers for card `id` up to question `index`: the PC card moves on
+/// too. `answers` holds every answer recorded so far (question text -> answer).
+pub fn card_progress(app: &AppHandle, shared: &Shared, id: &str, index: usize, answers: &serde_json::Map<String, Value>) {
+    emit_page(app, shared, "card-progress", json!({"id": id, "index": index, "answers": answers}));
+}
+
+/// A question card answered on the PC after some of its questions were answered on the
+/// phone: the PC sends the whole set, and the answers recorded on the phone stand.
+fn merge_phone_answers(mut data: Value, partial: &serde_json::Map<String, Value>) -> Value {
+    if let Some(answers) = data.get_mut("answers").and_then(Value::as_object_mut) {
+        for (k, v) in partial {
+            answers.insert(k.clone(), v.clone());
+        }
+    }
+    data
+}
+
 /// Resolve a pending card: `data` is the click ({answers} or {behavior}); None = timeout.
 pub fn finish_interactive(app: &AppHandle, shared: &Arc<Shared>, id: &str, data: Option<Value>) {
     let pending = shared.pending.lock().unwrap().remove(id);
     let Some(p) = pending else { return };
+    let data = match data {
+        Some(d) if p.kind == "question" && !p.partial.is_empty() => Some(merge_phone_answers(d, &p.partial)),
+        d => d,
+    };
     let mut out = json!({});
     if let Some(d) = &data {
         if p.kind == "question" {
@@ -984,6 +1094,64 @@ fn close_orphaned(app: &AppHandle, shared: &Arc<Shared>, id: &str, pid: u32) {
     drop(p);
     emit_page(app, shared, "resolve", json!({"id": id, "answered": true}));
     phone::resolved(shared, id, shared.t().tg_closed.to_string());
+}
+
+/// The user closed card `id` on the PC (its × or the hide hotkey): it never shows there again.
+/// With a phone that can answer it (a paired Telegram chat) and the card on its way there, it
+/// stays open for the phone; a message still waiting for the PC to go idle goes out now.
+/// Otherwise the hook gets `{}` at once and Claude Code shows its own dialog.
+pub fn dismiss_card(app: &AppHandle, shared: &Arc<Shared>, id: &str) {
+    // Before the pending lock: it reads the config.
+    let phone_answers = phone::answers_cards(shared);
+    let (held, send) = {
+        let mut pending = shared.pending.lock().unwrap();
+        let Some(p) = pending.get_mut(id).filter(|p| !p.dismissed) else { return };
+        p.dismissed = true;
+        keep_for_phone(phone_answers, &mut p.on_phone, &mut p.phone_wait)
+    };
+    if held {
+        util::log_line(&["card-dismissed", id, "phone"]);
+        if let Some(msg) = send {
+            phone::send_now(shared, msg);
+        }
+    } else {
+        util::log_line(&["card-dismissed", id, "released"]);
+        // No answer: the same reply as a timeout, so the question does not come back as a card
+        // through the permission request that follows.
+        finish_interactive(app, shared, id, Some(json!({})));
+    }
+}
+
+/// What closing a card on the PC does with it: (it stays open for the phone, its message to
+/// send there now). It stays when the phone can answer it and its message went there or was
+/// still waiting to go; a waiting message is taken, so the deferred send finds nothing left.
+fn keep_for_phone(phone_answers: bool, on_phone: &mut bool, phone_wait: &mut Option<PhoneMsg>) -> (bool, Option<PhoneMsg>) {
+    if !phone_answers {
+        return (false, None);
+    }
+    let send = phone_wait.take();
+    *on_phone |= send.is_some();
+    (*on_phone, send)
+}
+
+/// The hide hotkey: every banner, card and the limit-reset logo leave the screen. Open cards go
+/// as with their ×: on to the phone, or back to Claude Code's own dialog (dismiss_card).
+pub fn hide_all(app: &AppHandle, shared: &Arc<Shared>) {
+    let ids: Vec<String> = shared
+        .pending
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, p)| !p.dismissed)
+        .map(|(id, _)| id.clone())
+        .collect();
+    util::log_line(&["hide-all", &ids.len().to_string()]);
+    // The page first: it drops these cards for good (even one whose own event is still on its
+    // way), so a card released below never shows "Answer in the app" first.
+    emit_page(app, shared, "hide-all", json!({"ids": ids}));
+    for id in &ids {
+        dismiss_card(app, shared, id);
+    }
 }
 
 // ---------------------------------------------------------------- limits
@@ -1503,6 +1671,55 @@ mod tests {
             CARD_TEXT_PC,
         );
         assert_eq!(t, "mcp__github__create_or_update_file\nbranch: main\ncontent: x⏎y\nn: 3\npath: README.md");
+    }
+
+    #[test]
+    fn answered_lines_for_the_phone() {
+        assert_eq!(answered_text(0, 3, "Blue"), "1/3 ✓ Blue");
+        assert_eq!(answered_text(0, 1, "Blue"), "✓ Blue");
+        // One line, secrets masked, a long answer cut.
+        assert_eq!(answered_text(1, 3, "line one\n  line two"), "2/3 ✓ line one line two");
+        let t = answered_text(2, 3, "use password=hunter2 here");
+        assert!(t.starts_with("3/3 ✓ use password=") && !t.contains("hunter2"), "{t}");
+        let long = answered_text(0, 2, &"é".repeat(200));
+        assert!(long.ends_with('…') && long.chars().count() == "1/2 ✓ ".chars().count() + ANSWER_SHOWN, "{long}");
+        // In question order, only the answered ones.
+        let qs = vec![json!({"question": "A?"}), json!({"question": "B?"}), json!({"question": "C?"})];
+        let done = json!({"C?": "z", "A?": "x"});
+        assert_eq!(answered_lines(&qs, done.as_object().unwrap()), vec!["1/3 ✓ x", "3/3 ✓ z"]);
+        assert!(answered_lines(&qs, &serde_json::Map::new()).is_empty());
+    }
+
+    #[test]
+    fn phone_answers_stand_in_a_pc_submission() {
+        let partial = json!({"A?": "phone"}).as_object().unwrap().clone();
+        let merged = merge_phone_answers(json!({"answers": {"A?": "pc", "B?": "pc"}}), &partial);
+        assert_eq!(merged, json!({"answers": {"A?": "phone", "B?": "pc"}}));
+        let merged = merge_phone_answers(json!({"answers": {"B?": "pc"}}), &partial);
+        assert_eq!(merged, json!({"answers": {"A?": "phone", "B?": "pc"}}));
+        // Anything without answers is left alone.
+        assert_eq!(merge_phone_answers(json!({"behavior": "allow"}), &partial), json!({"behavior": "allow"}));
+    }
+
+    #[test]
+    fn closed_cards_stay_for_the_phone_only_when_it_can_answer() {
+        let msg = || PhoneMsg { urgent: false, kind: "question", text: "q".into(), html: None, buttons: vec![], pending_id: Some("7".into()) };
+        // On the phone already: it stays, nothing more is sent.
+        let (mut on, mut wait) = (true, None);
+        assert!(matches!(keep_for_phone(true, &mut on, &mut wait), (true, None)));
+        // Waiting for the PC to go idle: it goes now, once.
+        let (mut on, mut wait) = (false, Some(msg()));
+        let (held, send) = keep_for_phone(true, &mut on, &mut wait);
+        assert!(held && on && wait.is_none() && send.is_some_and(|m| m.pending_id.as_deref() == Some("7")));
+        assert!(matches!(keep_for_phone(true, &mut on, &mut wait), (true, None)));
+        // Never meant for the phone (its kind switched off there): released.
+        let (mut on, mut wait) = (false, None);
+        assert!(matches!(keep_for_phone(true, &mut on, &mut wait), (false, None)));
+        // No phone that can answer (off, ntfy only): released, and a waiting message stays put
+        // (it goes with the card).
+        let (mut on, mut wait) = (true, Some(msg()));
+        assert!(matches!(keep_for_phone(false, &mut on, &mut wait), (false, None)));
+        assert!(wait.is_some());
     }
 
     #[test]

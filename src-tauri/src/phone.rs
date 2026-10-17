@@ -106,6 +106,7 @@ pub fn push(shared: &Arc<Shared>, msg: PhoneMsg) {
     if msg.urgent {
         // Remote runs: the user is away and the request is denied without an answer, so the
         // per-event switches do not apply.
+        mark_on_phone(shared, &msg);
         deliver(shared, msg);
         return;
     }
@@ -114,6 +115,7 @@ pub fn push(shared: &Arc<Shared>, msg: PhoneMsg) {
     }
     let idle_required = config::get_u64(&cfg, "phone.onlyWhenIdleMs", 180000);
     if idle_required == 0 || crate::win::idle_ms() >= idle_required {
+        mark_on_phone(shared, &msg);
         deliver(shared, msg);
         return;
     }
@@ -126,6 +128,16 @@ pub fn push(shared: &Arc<Shared>, msg: PhoneMsg) {
         None
     };
     util::log_line(&["phone-deferred", msg.kind]);
+    // A card's message waits in the card itself: closing the card on the PC sends it at once
+    // (events::dismiss_card), and only one of the two ever takes it.
+    let card = msg.pending_id.clone();
+    let mut waiting = Some(msg);
+    if let Some(id) = &card {
+        match shared.pending.lock().unwrap().get_mut(id) {
+            Some(p) => p.phone_wait = waiting.take(),
+            None => return, // answered or closed already
+        }
+    }
     let shared = shared.clone();
     std::thread::spawn(move || {
         let started = util::now_ms();
@@ -137,24 +149,56 @@ pub fn push(shared: &Arc<Shared>, msg: PhoneMsg) {
             if util::now_ms() - started > window_ms as i64 {
                 return;
             }
-            if let Some(id) = &msg.pending_id {
-                if !shared.pending.lock().unwrap().contains_key(id) {
-                    return; // answered on the PC or expired
+            let unanswered = card.is_some() && unanswered_ms > 0 && util::now_ms() - started >= unanswered_ms as i64;
+            let due = unanswered || crate::win::idle_ms() >= idle_required;
+            if let Some(id) = &card {
+                let msg = {
+                    let mut pending = shared.pending.lock().unwrap();
+                    let Some(p) = pending.get_mut(id) else { return }; // answered on the PC or expired
+                    if p.phone_wait.is_none() {
+                        return; // sent already: the card was closed on the PC
+                    }
+                    if !due {
+                        continue;
+                    }
+                    p.on_phone = true;
+                    p.phone_wait.take()
+                };
+                if let Some(msg) = msg {
+                    deliver(&shared, msg);
                 }
-            } else if let Some(g) = generation {
+                return;
+            }
+            if let Some(g) = generation {
                 if shared.phone_generation.load(std::sync::atomic::Ordering::SeqCst) != g {
                     return; // a newer event replaced this one
                 }
             }
-            let unanswered = msg.pending_id.is_some()
-                && unanswered_ms > 0
-                && util::now_ms() - started >= unanswered_ms as i64;
-            if unanswered || crate::win::idle_ms() >= idle_required {
-                deliver(&shared, msg);
+            if due {
+                if let Some(msg) = waiting.take() {
+                    deliver(&shared, msg);
+                }
                 return;
             }
         }
     });
+}
+
+/// The card `msg` belongs to (if any) has its message on the way to the phone.
+fn mark_on_phone(shared: &Shared, msg: &PhoneMsg) {
+    if let Some(id) = &msg.pending_id {
+        if let Some(p) = shared.pending.lock().unwrap().get_mut(id) {
+            p.on_phone = true;
+        }
+    }
+}
+
+/// A card closed on the PC whose message was still waiting for the PC to go idle: it goes to
+/// the phone now, ignoring the idle rule (the caller took it out of the card).
+pub fn send_now(shared: &Arc<Shared>, mut msg: PhoneMsg) {
+    msg.urgent = true;
+    util::log_line(&["phone-now", msg.kind]);
+    deliver(shared, msg);
 }
 
 fn deliver(shared: &Arc<Shared>, msg: PhoneMsg) {
@@ -187,7 +231,20 @@ fn deliver(shared: &Arc<Shared>, msg: PhoneMsg) {
                     }
                     util::log_line(&["telegram-sent", msg.kind]);
                 }
-                Err(e) => util::log_line(&["telegram-error", &e]),
+                Err(e) => {
+                    util::log_line(&["telegram-error", &e]);
+                    // The phone cannot answer a card it never got (ntfy cannot answer at all):
+                    // closing it on the PC releases it at once, and one closed already ends now
+                    // (its timer replies within a second), instead of after phone.holdMs.
+                    if let Some(id) = &msg.pending_id {
+                        if let Some(p) = shared.pending.lock().unwrap().get_mut(id) {
+                            p.on_phone = false;
+                            if p.dismissed {
+                                p.deadline_ms = util::now_ms();
+                            }
+                        }
+                    }
+                }
             }
         }
         if let Some(topic) = ntfy_topic {
@@ -217,10 +274,18 @@ pub fn resolved(shared: &Arc<Shared>, id: &str, summary: String) {
         }
         ids
     };
-    {
+    if shared.tg_last_pending.lock().unwrap().as_deref() == Some(id) {
+        // Plain text now goes to the newest card still open on the phone, if any. One lock at a
+        // time: messages first, then the open cards.
+        let open: Vec<(i64, String)> = shared.tg_msgs.lock().unwrap().iter().map(|(k, v)| (*k, v.0.clone())).collect();
+        let newest = {
+            let pending = shared.pending.lock().unwrap();
+            open.into_iter().filter(|(_, card)| pending.contains_key(card)).max_by_key(|(mid, _)| *mid).map(|(_, card)| card)
+        };
         let mut lp = shared.tg_last_pending.lock().unwrap();
+        // Unless a newer card reached the phone meanwhile.
         if lp.as_deref() == Some(id) {
-            *lp = None;
+            *lp = newest;
         }
     }
     if mids.is_empty() {
@@ -244,4 +309,11 @@ pub fn configured(shared: &Shared) -> bool {
     }
     telegram::creds(&cfg).map(|c| !c.chat_id.is_empty()).unwrap_or(false)
         || config::get_str(&cfg, "phone.ntfy.topic").map(|t| !t.trim().is_empty()).unwrap_or(false)
+}
+
+/// True when the phone can answer a card: phone delivery is on and a Telegram chat is paired
+/// (ntfy only notifies). Only then does a card closed on the PC stay open for the phone.
+pub fn answers_cards(shared: &Shared) -> bool {
+    let cfg = shared.cfg();
+    config::get_bool(&cfg, "phone.enabled", true) && telegram::creds(&cfg).is_some_and(|c| !c.chat_id.is_empty())
 }

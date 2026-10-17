@@ -325,10 +325,10 @@ fn plain(c: &Creds, chat: &str, text: &str) {
 // ---------------------------------------------------------------- questions
 
 /// Answer question `qi` of a question card from the phone. A multi-question card collects
-/// answers one by one and moves its Telegram message on to the next question; the card is
-/// resolved when every question has an answer. Returns false when the card or question is
-/// not current any more.
-fn answer_question(app: &AppHandle, shared: &Arc<Shared>, id: &str, qi: usize, answer: String) -> bool {
+/// answers one by one; the card is resolved when every question has an answer. `tapped` is
+/// the card message whose button gave the answer (None: the answer was typed). Returns false
+/// when the card or question is not current any more.
+fn answer_question(app: &AppHandle, shared: &Arc<Shared>, id: &str, qi: usize, answer: String, tapped: Option<i64>) -> bool {
     let progress = {
         let mut pending = shared.pending.lock().unwrap();
         let Some(p) = pending.get_mut(id) else { return false };
@@ -338,42 +338,74 @@ fn answer_question(app: &AppHandle, shared: &Arc<Shared>, id: &str, qi: usize, a
         let Some(qs) = p.event.pointer("/tool_input/questions").and_then(Value::as_array) else { return false };
         let total = qs.len();
         let Some(key) = qs.get(qi).and_then(|q| q.get("question")).and_then(Value::as_str).map(String::from) else { return false };
-        p.partial.insert(key, Value::String(answer));
+        p.partial.insert(key, Value::String(answer.clone()));
         if p.partial.len() >= total {
             Err(Value::Object(p.partial.clone()))
         } else {
-            Ok((p.event.clone(), p.partial.len()))
+            Ok((p.event.clone(), p.partial.clone()))
         }
     };
     MULTI.lock().unwrap().retain(|(i, q, _)| !(i == id && *q == qi));
-    match progress {
-        Err(all) => events::finish_interactive(app, shared, id, Some(json!({"answers": all}))),
-        Ok((event, next)) => {
-            if let Some((_, html, buttons)) = events::phone_question(shared, id, &event, next) {
-                let mid = shared.tg_msgs.lock().unwrap().iter().find(|(_, v)| v.0 == id && !v.1.is_empty()).map(|(k, _)| *k);
-                let mut shown = None;
-                if let Some(mid) = mid {
-                    shared.tg_msgs.lock().unwrap().insert(mid, (id.to_string(), html.clone()));
-                    if edit_with_buttons(shared, mid, &html, &buttons) {
-                        shown = Some(mid);
-                    }
-                }
-                if shown.is_none() {
-                    // Could not move the old message on: send the next question as a new one.
-                    if let Ok(new_mid) = send(shared, &html, &buttons) {
-                        shared.tg_card_msgs.lock().unwrap().insert(new_mid);
-                        shared.tg_msgs.lock().unwrap().insert(new_mid, (id.to_string(), html.clone()));
-                        shown = Some(new_mid);
-                    }
-                }
-                // Closed (on the PC, or expired) while this was being sent: close it again.
-                if let Some(m) = shown {
-                    if !shared.pending.lock().unwrap().contains_key(id) {
-                        shared.tg_msgs.lock().unwrap().remove(&m);
-                        edit(shared, m, &with_footer(&html, shared.t().tg_closed));
+    let (event, done) = match progress {
+        Err(all) => {
+            events::finish_interactive(app, shared, id, Some(json!({"answers": all})));
+            return true;
+        }
+        Ok(x) => x,
+    };
+    let next = done.len();
+    util::log_line(&["tg-progress", id, &next.to_string(), if tapped.is_some() { "button" } else { "typed" }]);
+    // The PC card moves on to the same question.
+    events::card_progress(app, shared, id, next, &done);
+    let Some((_, html, buttons)) = events::phone_question(shared, id, &event, next, &done) else { return true };
+    // The card's open message on the phone (one, unless an earlier move failed half-way).
+    let live: Vec<i64> = shared.tg_msgs.lock().unwrap().iter().filter(|(_, v)| v.0 == id).map(|(k, _)| *k).collect();
+    let in_place = tapped.filter(|m| live.contains(m));
+    let mut shown = None;
+    // After a tap the message is on screen: it moves on to the next question in place.
+    if let Some(mid) = in_place {
+        if edit_with_buttons(shared, mid, &html, &buttons) {
+            shared.tg_msgs.lock().unwrap().insert(mid, (id.to_string(), html.clone()));
+            shown = Some(mid);
+        }
+    }
+    if shown.is_none() {
+        // After a typed answer the card message sits above the prompt and the reply, maybe out
+        // of view: the next question goes to the bottom of the chat as a new message.
+        match send(shared, &html, &buttons) {
+            Ok(new_mid) => {
+                shared.tg_card_msgs.lock().unwrap().insert(new_mid);
+                shared.tg_msgs.lock().unwrap().insert(new_mid, (id.to_string(), html.clone()));
+                shared.tg_last_pending_ms.store(util::now_ms(), Ordering::SeqCst);
+                *shared.tg_last_pending.lock().unwrap() = Some(id.to_string());
+                shown = Some(new_mid);
+                // The old message keeps its question with the answer under it, and no buttons:
+                // it takes no more input (unless resolved() closed it meanwhile).
+                let compact = events::phone_question_answered(shared, &event, qi, &answer);
+                for mid in live {
+                    if shared.tg_msgs.lock().unwrap().remove(&mid).is_some() {
+                        if let Some(compact) = &compact {
+                            edit(shared, mid, compact);
+                        }
                     }
                 }
             }
+            Err(e) => {
+                util::log_line(&["telegram-error", &e]);
+                // Could not send: move the old message on instead (a tap already tried that).
+                if let (None, Some(&mid)) = (in_place, live.first()) {
+                    if edit_with_buttons(shared, mid, &html, &buttons) {
+                        shared.tg_msgs.lock().unwrap().insert(mid, (id.to_string(), html.clone()));
+                        shown = Some(mid);
+                    }
+                }
+            }
+        }
+    }
+    // Closed (on the PC, or expired) while this was being sent: close it again.
+    if let Some(m) = shown {
+        if !shared.pending.lock().unwrap().contains_key(id) && shared.tg_msgs.lock().unwrap().remove(&m).is_some() {
+            edit(shared, m, &with_footer(&html, shared.t().tg_closed));
         }
     }
     true
@@ -425,9 +457,9 @@ fn toggle_multi(shared: &Shared, id: &str, qi: usize, oi: usize) {
 /// Redraw a card's current question on its message (the ticks of a multi-select question).
 fn refresh_question(shared: &Shared, id: &str, qi: usize, mid: Option<i64>) {
     let Some(mid) = mid else { return };
-    let event = shared.pending.lock().unwrap().get(id).map(|p| p.event.clone());
-    let Some(event) = event else { return };
-    let Some((_, html, buttons)) = events::phone_question(shared, id, &event, qi) else { return };
+    let card = shared.pending.lock().unwrap().get(id).map(|p| (p.event.clone(), p.partial.clone()));
+    let Some((event, done)) = card else { return };
+    let Some((_, html, buttons)) = events::phone_question(shared, id, &event, qi, &done) else { return };
     if let Some(entry) = shared.tg_msgs.lock().unwrap().get_mut(&mid) {
         entry.1 = html.clone();
     }
@@ -829,7 +861,7 @@ fn handle_update(app: &AppHandle, shared: &Arc<Shared>, c: &Creds, u: &Value) {
                 if let Some((options, current, _)) = current_question(shared, &id) {
                     if current == qi {
                         if let Some(label) = options.get(oi).filter(|l| !l.is_empty()) {
-                            if answer_question(app, shared, &id, qi, label.clone()) {
+                            if answer_question(app, shared, &id, qi, label.clone(), card_mid) {
                                 reply = t.tg_answered;
                             }
                         }
@@ -860,7 +892,7 @@ fn handle_update(app: &AppHandle, shared: &Arc<Shared>, c: &Creds, u: &Value) {
                             .collect();
                         if picked.is_empty() {
                             reply = t.tg_pick_one;
-                        } else if answer_question(app, shared, &id, qi, picked.join(", ")) {
+                        } else if answer_question(app, shared, &id, qi, picked.join(", "), card_mid) {
                             reply = t.tg_answered;
                         }
                     }
@@ -906,11 +938,12 @@ fn handle_update(app: &AppHandle, shared: &Arc<Shared>, c: &Creds, u: &Value) {
         let current = current_question(shared, &id).map(|(_, q, _)| q);
         if current == Some(qi) {
             util::log_line(&["tg-text", "prompt", &id]);
-            if answer_question(app, shared, &id, qi, text.clone()) {
+            if answer_question(app, shared, &id, qi, text.clone(), None) {
                 return;
             }
         }
-        plain(c, &chat, t.tg_no_open);
+        // That question was answered meanwhile; the card may still be open on a later one.
+        plain(c, &chat, if current.is_some() { t.tg_use_buttons } else { t.tg_no_open });
         return;
     }
     // Plain text right after tapping "Other…" answers that question; an explicit reply to
@@ -920,7 +953,7 @@ fn handle_update(app: &AppHandle, shared: &Arc<Shared>, c: &Creds, u: &Value) {
         let current = current_question(shared, &id).map(|(_, q, _)| q);
         if current == Some(qi) {
             util::log_line(&["tg-text", "await", &id]);
-            if !answer_question(app, shared, &id, qi, text.clone()) {
+            if !answer_question(app, shared, &id, qi, text.clone(), None) {
                 plain(c, &chat, t.tg_no_open);
             }
             return;
@@ -938,10 +971,13 @@ fn handle_update(app: &AppHandle, shared: &Arc<Shared>, c: &Creds, u: &Value) {
     //     nothing while another PC polls the same bot (the card may be that PC's).
     let reply_mid = reply_to;
     let replied_card = reply_mid.and_then(|mid| shared.tg_msgs.lock().unwrap().get(&mid).map(|v| v.0.clone()));
-    // A reply to a card that is already closed is not a new prompt for anybody.
+    // A reply to a card that is already closed (or to a question of it already answered) is
+    // not a new prompt for anybody.
     if let (Some(mid), None) = (reply_mid, &replied_card) {
         if shared.tg_card_msgs.lock().unwrap().contains(&mid) {
-            plain(c, &chat, t.tg_no_open);
+            let open = shared.tg_last_pending.lock().unwrap().clone();
+            let open = open.filter(|id| shared.pending.lock().unwrap().contains_key(id));
+            plain(c, &chat, if open.is_some() { t.tg_use_buttons } else { t.tg_no_open });
             return;
         }
     }
@@ -992,7 +1028,7 @@ fn handle_update(app: &AppHandle, shared: &Arc<Shared>, c: &Creds, u: &Value) {
     let kind = kind_of(&id);
     if kind.as_deref() == Some("question") {
         let qi = current_question(shared, &id).map(|(_, qi, _)| qi).unwrap_or(usize::MAX);
-        if !answer_question(app, shared, &id, qi, text.clone()) {
+        if !answer_question(app, shared, &id, qi, text.clone(), None) {
             plain(c, &chat, t.tg_no_open);
         }
         return;

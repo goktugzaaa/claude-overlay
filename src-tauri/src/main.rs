@@ -20,6 +20,7 @@
 mod config;
 mod events;
 mod hooks;
+mod hotkey;
 mod http;
 mod i18n;
 mod installer;
@@ -53,6 +54,13 @@ pub struct Pending {
     /// Answers collected so far when a multi-question card is answered on the phone, one
     /// question at a time (question text -> answer).
     pub partial: serde_json::Map<String, Value>,
+    /// The card's phone message while it waits for the PC to go idle (phone::push). Whoever
+    /// sends it takes it: the deferred send, or closing the card on the PC.
+    pub phone_wait: Option<phone::PhoneMsg>,
+    /// The card's message went to the phone, or is on its way.
+    pub on_phone: bool,
+    /// Closed on the PC (its × or the hide hotkey): it never shows there again.
+    pub dismissed: bool,
 }
 
 /// Clickable area of an interactive card, in CSS pixels of the overlay page.
@@ -180,6 +188,14 @@ fn hot_rects(rects: Vec<Rect>, window: tauri::WebviewWindow, shared: State<'_, A
 fn answer(id: String, data: Value, window: tauri::WebviewWindow, app: AppHandle, shared: State<'_, Arc<Shared>>) {
     if from_overlay(&window) {
         events::finish_interactive(&app, &shared, &id, Some(data));
+    }
+}
+
+/// The user closed a card with its ×: it leaves the PC for good (see events::dismiss_card).
+#[tauri::command]
+fn dismiss_card(id: String, window: tauri::WebviewWindow, app: AppHandle, shared: State<'_, Arc<Shared>>) {
+    if from_overlay(&window) {
+        events::dismiss_card(&app, &shared, &id);
     }
 }
 
@@ -522,6 +538,7 @@ fn main() {
             rlog,
             hot_rects,
             answer,
+            dismiss_card,
             extend_wait,
             focus_input,
             logo_state,
@@ -561,6 +578,7 @@ fn main() {
             events::start_toast_listener(handle.clone(), setup_shared.clone());
             events::start_cursor_poll(handle.clone(), setup_shared.clone());
             telegram::start(handle.clone(), setup_shared.clone());
+            hotkey::start(handle.clone(), setup_shared.clone());
             events::first_run(handle, setup_shared);
             Ok(())
         })
